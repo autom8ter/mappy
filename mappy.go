@@ -2,6 +2,7 @@ package mappy
 
 import (
 	"bytes"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"github.com/autom8ter/mappy/rafty"
@@ -10,10 +11,17 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/user"
 	"strings"
 	"sync"
 	"time"
 )
+
+func init() {
+	gob.Register(&sBucket{})
+	gob.Register(&mappy{})
+	gob.Register(&Record{})
+}
 
 type Op int
 
@@ -102,11 +110,11 @@ type sBucket struct {
 }
 
 func (s *sBucket) Encode(w io.Writer) error {
-	return rafty.WriteMsgPack(w, w)
+	return gob.NewEncoder(w).Encode(s)
 }
 
 func (s *sBucket) Decode(r io.Reader) error {
-	return rafty.ReadMsgPack(s, r)
+	return gob.NewDecoder(r).Decode(s)
 }
 
 func (s *sBucket) Nested(key string) Bucket {
@@ -214,7 +222,6 @@ type Mappy interface {
 	Bucket
 	Bucket(r *Record) Bucket
 	AddPeer(addr string) error
-	Open(path string) error
 	Close() error
 }
 
@@ -261,23 +268,50 @@ func (m *mappy) Restore(closer io.ReadCloser) error {
 type Opts struct {
 	Path     string
 	LogLevel string
+	Listen string
+	MaxPool int
 }
 
-func Open(opts *Opts) (*mappy, error) {
+var DefaultOpts = &Opts{
+	Path:     "/tmp/mappy",
+	LogLevel: "DEBUG",
+	Listen: fmt.Sprintf("127.0.0.1:8765"),
+	MaxPool: 5,
+}
+
+func Open(opts *Opts) (Mappy, error) {
 	if _, err := os.Stat(opts.Path); os.IsNotExist(err) {
 		os.MkdirAll(opts.Path, 0777)
 	}
 	config := raft.DefaultConfig()
-	logStore, _ := rafty.NewboltRaft(opts.Path + "/mappy.db")
-	snapshotStore, _ := raft.NewFileSnapshotStore(opts.Path, 1, os.Stdout)
-	addr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1")
-	transport, _ := raft.NewTCPTransport("127.0.0.1", addr, 3, time.Second, os.Stderr)
+	logStore, err := rafty.NewboltRaft(opts.Path + "/mappy.db")
+	if err != nil {
+		return nil, err
+	}
+	snapshotStore, err := raft.NewFileSnapshotStore(opts.Path, 1, os.Stdout)
+	if err != nil {
+		return nil, err
+	}
+	addr, err := net.ResolveTCPAddr("tcp", opts.Listen)
+	if err != nil {
+		return nil, err
+	}
+	transport, err := raft.NewTCPTransport(opts.Listen, addr, opts.MaxPool, time.Second, os.Stderr)
+	if err != nil {
+		return nil, err
+	}
 	config.Logger = hclog.New(&hclog.LoggerOptions{
 		Name:   "mappy",
 		Level:  hclog.LevelFromString(opts.LogLevel),
 		Output: os.Stderr,
 	})
+	usr, err := user.Current()
+	if err != nil {
+		return nil, err
+	}
+	config.LocalID = raft.ServerID(fmt.Sprintf("%s %s", usr.Name, opts.Listen))
 	m := &mappy{
+		logger: config.Logger,
 		sBucket: &sBucket{
 			BucketPath: nil,
 			onChange:   nil,
@@ -289,7 +323,6 @@ func Open(opts *Opts) (*mappy, error) {
 		return nil, err
 	}
 	m.rft = r
-	m.logger = config.Logger
 	return m, nil
 }
 
