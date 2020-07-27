@@ -3,6 +3,7 @@ package mappy
 import (
 	"bytes"
 	"encoding/gob"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/autom8ter/mappy/rafty"
@@ -11,8 +12,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/user"
-	"strings"
 	"sync"
 	"time"
 )
@@ -21,6 +20,7 @@ func init() {
 	gob.Register(&sBucket{})
 	gob.Register(&mappy{})
 	gob.Register(&Record{})
+	gob.Register(&storedRecord{})
 }
 
 type Op int
@@ -34,10 +34,11 @@ const (
 var Done = errors.New("mappy: done")
 
 type Record struct {
-	bucketPath []string
-	Key        interface{}   `json:"key"`
+	Key        string   `json:"key"`
 	Val        interface{}   `json:"val"`
-	Exp        time.Duration `json:"exp"`
+	Exp        int64 `json:"exp"`
+	bucketPath []string
+	updatedAt int64
 }
 
 func (r *Record) toStored() *storedRecord {
@@ -46,6 +47,7 @@ func (r *Record) toStored() *storedRecord {
 		Key:        r.Key,
 		Val:        r.Val,
 		Exp:        r.Exp,
+		UpdatedAt:  r.updatedAt,
 	}
 }
 
@@ -53,60 +55,78 @@ func (r *Record) BucketPath() []string {
 	return r.bucketPath
 }
 
+func (r *Record) UpdatedAt() time.Time {
+	return time.Unix(0, r.updatedAt)
+}
+
+func (r *Record) JSON() string {
+	bits, _ := json.MarshalIndent(r, "", "    ")
+	return fmt.Sprintf("%s", bits)
+}
+
 type storedRecord struct {
 	BucketPath []string      `json:"bucketPath"`
-	Key        interface{}   `json:"key"`
+	Key        string   `json:"key"`
 	Val        interface{}   `json:"val"`
-	Exp        time.Duration `json:"exp"`
+	Exp        int64 `json:"exp"`
+	UpdatedAt  int64 `json:"updatedAt"`
 }
 
-func (r *Record) toLog(term uint64) (*raft.Log, error) {
-	buffer, err := rafty.EncodeMsgPack(r.toStored())
-	if err != nil {
-		return nil, err
-	}
-	return &raft.Log{
-		Index:      rafty.BytesToUint64([]byte(strings.Join(r.bucketPath, ","))),
-		Term:       term,
-		Type:       raft.LogCommand,
-		Data:       buffer.Bytes(),
-		Extensions: nil,
-	}, nil
+type Log struct {
+	Op Op
+	New *Record
+	Old *Record
+	CreatedAt int64
 }
 
-func fromLog(lg *raft.Log) (*Record, error) {
-	var stored storedRecord
+func fromLog(lg *raft.Log) (*Log, error) {
+	var stored Log
 	if err := rafty.ReadMsgPack(&stored, bytes.NewBuffer(lg.Data)); err != nil {
 		return nil, err
 	}
-	return &Record{
-		bucketPath: stored.BucketPath,
-		Key:        stored.Key,
-		Val:        stored.Val,
-		Exp:        stored.Exp,
-	}, nil
+	return &stored, nil
+}
+
+func (l *Log) encode() (*bytes.Buffer, error) {
+	return rafty.EncodeMsgPack(l)
 }
 
 type ViewFunc func(record *Record) error
 
-type ChangeHandlerFunc func(op Op, old, new *Record) error
+type ChangeHandlerFunc func(log *Log) error
 
 type Bucket interface {
 	Nested(key string) Bucket
-	Delete(key interface{}) error
+	Delete(key string) error
 	Len() int
 	OnChange(fns ...ChangeHandlerFunc)
-	Get(key interface{}) (value *Record, ok bool)
+	HandleChange(log *Log) error
+	Get(key string) (value *Record, ok bool)
 	Set(record *Record) error
 	View(fn ViewFunc) error
 	Decode(r io.Reader) error
 	Encode(w io.Writer) error
+	Store() *sync.Map
 }
 
 type sBucket struct {
+	applyFn func(data []byte) *Result
 	BucketPath []string `json:"bucketPath"`
 	onChange   []ChangeHandlerFunc
 	Records    *sync.Map `json:"records"`
+}
+
+func (s *sBucket) Store() *sync.Map {
+	return s.Records
+}
+
+func (s *sBucket) HandleChange(log *Log) error {
+	for _, fn := range s.onChange {
+		if err := fn(log); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *sBucket) Encode(w io.Writer) error {
@@ -119,14 +139,20 @@ func (s *sBucket) Decode(r io.Reader) error {
 
 func (s *sBucket) Nested(key string) Bucket {
 	val, ok := s.Records.Load(key)
-	if !ok {
-		return nil
-	}
-	bucket, ok := val.(Bucket)
 	bucketPath := s.BucketPath
 	bucketPath = append(bucketPath, key)
 	if !ok {
 		return &sBucket{
+			applyFn: s.applyFn,
+			BucketPath: bucketPath,
+			onChange:   nil,
+			Records:    &sync.Map{},
+		}
+	}
+	bucket, ok := val.(Bucket)
+	if !ok {
+		return &sBucket{
+			applyFn: s.applyFn,
 			BucketPath: bucketPath,
 			onChange:   nil,
 			Records:    &sync.Map{},
@@ -150,7 +176,7 @@ func (s *sBucket) Len() int {
 	return counter
 }
 
-func (s *sBucket) getRecord(key interface{}) (*Record, bool) {
+func (s *sBucket) getRecord(key string) (*Record, bool) {
 	val, ok := s.Records.Load(key)
 	if !ok {
 		return nil, false
@@ -162,37 +188,42 @@ func (s *sBucket) getRecord(key interface{}) (*Record, bool) {
 	return record, true
 }
 
-func (s *sBucket) Delete(key interface{}) error {
-	record, ok := s.getRecord(key)
-	if ok {
-		s.Records.Delete(key)
-		for _, fn := range s.onChange {
-			if err := fn(DELETE, record, nil); err != nil {
-				return err
-			}
-		}
+func (s *sBucket) Delete(key string) error {
+	before, _ := s.getRecord(key)
+	lg := &Log{
+		Op:        DELETE,
+		New:       nil,
+		Old:       before,
+		CreatedAt: time.Now().Unix(),
 	}
-	return nil
+	buf, err := lg.encode()
+	if err != nil {
+		return err
+	}
+	return s.applyFn(buf.Bytes()).Err
 }
 
 func (s *sBucket) OnChange(fns ...ChangeHandlerFunc) {
 	s.onChange = append(s.onChange, fns...)
 }
 
-func (s *sBucket) Get(key interface{}) (*Record, bool) {
+func (s *sBucket) Get(key string) (*Record, bool) {
 	return s.getRecord(key)
 }
 
 func (s *sBucket) Set(record *Record) error {
-	record.bucketPath = s.BucketPath
 	before, _ := s.getRecord(record.Key)
-	s.Records.Store(record.Key, record)
-	for _, fn := range s.onChange {
-		if err := fn(SET, before, record); err != nil {
-			return err
-		}
+	lg := &Log{
+		Op:        SET,
+		New:       record,
+		Old:       before,
+		CreatedAt: time.Now().Unix(),
 	}
-	return nil
+	buf, err := lg.encode()
+	if err != nil {
+		return err
+	}
+	return s.applyFn(buf.Bytes()).Err
 }
 
 func (s *sBucket) View(fn ViewFunc) error {
@@ -221,18 +252,26 @@ func (s *sBucket) View(fn ViewFunc) error {
 type Mappy interface {
 	Bucket
 	Bucket(r *Record) Bucket
-	AddPeer(addr string) error
 	Close() error
+	Destroy() error
+	Raft() Raft
 }
 
 type mappy struct {
 	*sBucket
+	o *Opts
 	rft    *raft.Raft
 	logger hclog.Logger
+	shutdown bool
+}
+
+func (m *mappy) Raft() Raft {
+	return &rft{impl: m.rft}
 }
 
 func (m *mappy) Persist(sink raft.SnapshotSink) error {
 	if err := m.Encode(sink); err != nil {
+		sink.Cancel()
 		return err
 	}
 	return sink.Close()
@@ -243,18 +282,23 @@ func (m *mappy) Release() {
 }
 
 func (m *mappy) Apply(log *raft.Log) interface{} {
-	record, err := fromLog(log)
+	lg, err := fromLog(log)
 	if err != nil {
 		return err
 	}
-	bucket := m.bucket()
-	for _, b := range record.bucketPath {
-		bucket = bucket.Nested(b)
+	switch lg.Op {
+	case DELETE:
+		m.Bucket(lg.Old).Store().Delete(lg)
+		return m.Bucket(lg.Old).HandleChange(lg)
+	case EXPIRE:
+		m.Bucket(lg.Old).Store().Delete(lg)
+		return m.Bucket(lg.Old).HandleChange(lg)
+	case SET:
+		m.Bucket(lg.Old).Store().Store(lg.New.Key, lg.New)
+		return m.Bucket(lg.Old).HandleChange(lg)
+	default:
+		return m.Bucket(lg.Old).HandleChange(lg)
 	}
-	if err := bucket.Set(record); err != nil {
-		return err
-	}
-	return nil
 }
 
 func (m *mappy) Snapshot() (raft.FSMSnapshot, error) {
@@ -266,17 +310,25 @@ func (m *mappy) Restore(closer io.ReadCloser) error {
 }
 
 type Opts struct {
+	Leader bool
 	Path     string
+	LocalID  string
 	LogLevel string
 	Listen string
 	MaxPool int
+	SnapshotRetention int
+	Timeout time.Duration
 }
 
 var DefaultOpts = &Opts{
+	Leader: true,
 	Path:     "/tmp/mappy",
+	LocalID: fmt.Sprintf("127.0.0.1:8765"),
 	LogLevel: "DEBUG",
 	Listen: fmt.Sprintf("127.0.0.1:8765"),
 	MaxPool: 5,
+	SnapshotRetention: 1,
+	Timeout: 5 *time.Second,
 }
 
 func Open(opts *Opts) (Mappy, error) {
@@ -288,7 +340,7 @@ func Open(opts *Opts) (Mappy, error) {
 	if err != nil {
 		return nil, err
 	}
-	snapshotStore, err := raft.NewFileSnapshotStore(opts.Path, 1, os.Stdout)
+	snapshotStore, err := raft.NewFileSnapshotStore(opts.Path, opts.SnapshotRetention, os.Stdout)
 	if err != nil {
 		return nil, err
 	}
@@ -296,7 +348,7 @@ func Open(opts *Opts) (Mappy, error) {
 	if err != nil {
 		return nil, err
 	}
-	transport, err := raft.NewTCPTransport(opts.Listen, addr, opts.MaxPool, time.Second, os.Stderr)
+	transport, err := raft.NewTCPTransport(opts.Listen, addr, opts.MaxPool, opts.Timeout, os.Stderr)
 	if err != nil {
 		return nil, err
 	}
@@ -305,11 +357,7 @@ func Open(opts *Opts) (Mappy, error) {
 		Level:  hclog.LevelFromString(opts.LogLevel),
 		Output: os.Stderr,
 	})
-	usr, err := user.Current()
-	if err != nil {
-		return nil, err
-	}
-	config.LocalID = raft.ServerID(fmt.Sprintf("%s %s", usr.Name, opts.Listen))
+	config.LocalID = raft.ServerID(opts.LocalID)
 	m := &mappy{
 		logger: config.Logger,
 		sBucket: &sBucket{
@@ -322,12 +370,45 @@ func Open(opts *Opts) (Mappy, error) {
 	if err != nil {
 		return nil, err
 	}
+	m.applyFn = func(data []byte) *Result {
+		fut := r.Apply(data, opts.Timeout)
+		if fut.Error() != nil {
+			return &Result{
+				Err:   fut.Error(),
+			}
+		}
+		r := &Result{
+			Index: fut.Index(),
+		}
+		if l, ok := fut.Response().(*Log); ok {
+			r.Log = l
+		}
+		return r
+	}
+	if opts.Leader {
+		configuration := raft.Configuration{
+			Servers: []raft.Server{
+				{
+					ID:      config.LocalID,
+					Address: transport.LocalAddr(),
+				},
+			},
+		}
+		if err := r.BootstrapCluster(configuration).Error(); err != nil && err != raft.ErrCantBootstrap{
+			return nil, err
+		}
+	}
+	m.o = opts
 	m.rft = r
 	return m, nil
 }
 
-func (m mappy) Close() error {
-	return m.rft.Shutdown().Error()
+func (m *mappy) Close() error {
+	if err :=  m.rft.Shutdown().Error(); err != nil {
+		return err
+	}
+	m.shutdown = true
+	return nil
 }
 
 func (m *mappy) Bucket(r *Record) Bucket {
@@ -339,6 +420,39 @@ func (m *mappy) Bucket(r *Record) Bucket {
 	return nested
 }
 
-func (m *mappy) AddPeer(addr string) error {
-	return m.rft.AddPeer(raft.ServerAddress(addr)).Error()
+type Raft interface {
+	AddPeer(addr string) error
+	Stats() map[string]string
+	State() string
+}
+
+type rft struct {
+	impl *raft.Raft
+}
+
+func (m *rft) AddPeer(addr string) error {
+	return m.impl.AddPeer(raft.ServerAddress(addr)).Error()
+}
+
+func (m *rft) Stats() map[string]string {
+	return m.impl.Stats()
+}
+
+func (m *rft) State() string {
+	return m.impl.State().String()
+}
+
+type Result struct {
+	Index uint64
+	Log *Log
+	Err error
+}
+
+func (m *mappy) Destroy() error {
+	if !m.shutdown {
+		if err := m.Close(); err != nil {
+			return err
+		}
+	}
+	return os.RemoveAll(m.o.Path)
 }
