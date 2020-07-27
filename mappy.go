@@ -213,6 +213,7 @@ func (s *sBucket) View(fn ViewFunc) error {
 type Mappy interface {
 	Bucket
 	Bucket(r *Record) Bucket
+	AddPeer(addr string) error
 	Open(path string) error
 	Close() error
 }
@@ -303,4 +304,8 @@ func (m *mappy) Bucket(r *Record) Bucket {
 		nested = nested.Nested(nest)
 	}
 	return nested
+}
+
+func (m *mappy) AddPeer(addr string) error {
+	return m.rft.AddPeer(raft.ServerAddress(addr)).Error()
 }
