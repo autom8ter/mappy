@@ -66,15 +66,6 @@ func (r *Record) toLog(term uint64) (*raft.Log, error) {
 	}, nil
 }
 
-func (r *Record) Bucket(m Mappy) Bucket {
-	bucket := Bucket(m)
-	nested := bucket
-	for _, nest := range r.bucketPath {
-		nested = nested.Nested(nest)
-	}
-	return nested
-}
-
 func fromLog(lg *raft.Log) (*Record, error) {
 	var stored storedRecord
 	if err := rafty.ReadMsgPack(&stored, bytes.NewBuffer(lg.Data)); err != nil {
