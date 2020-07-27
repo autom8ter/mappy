@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"github.com/autom8ter/mappy/rafty"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
 	"io"
@@ -52,12 +53,12 @@ type storedRecord struct {
 }
 
 func (r *Record) toLog(term uint64) (*raft.Log, error) {
-	buffer, err := encodeMsgPack(r.toStored())
+	buffer, err := rafty.EncodeMsgPack(r.toStored())
 	if err != nil {
 		return nil, err
 	}
 	return &raft.Log{
-		Index:      bytesToUint64([]byte(strings.Join(r.bucketPath, ","))),
+		Index:      rafty.BytesToUint64([]byte(strings.Join(r.bucketPath, ","))),
 		Term:       term,
 		Type:       raft.LogCommand,
 		Data:       buffer.Bytes(),
@@ -65,9 +66,18 @@ func (r *Record) toLog(term uint64) (*raft.Log, error) {
 	}, nil
 }
 
+func (r *Record) Bucket(m Mappy) Bucket {
+	bucket := Bucket(m)
+	nested := bucket
+	for _, nest := range r.bucketPath {
+		nested = nested.Nested(nest)
+	}
+	return nested
+}
+
 func fromLog(lg *raft.Log) (*Record, error) {
 	var stored storedRecord
-	if err := readMsgPack(&stored, bytes.NewBuffer(lg.Data)); err != nil {
+	if err := rafty.ReadMsgPack(&stored, bytes.NewBuffer(lg.Data)); err != nil {
 		return nil, err
 	}
 	return &Record{
@@ -101,11 +111,11 @@ type sBucket struct {
 }
 
 func (s *sBucket) Encode(w io.Writer) error {
-	return writeMsgPack(w, w)
+	return rafty.WriteMsgPack(w, w)
 }
 
 func (s *sBucket) Decode(r io.Reader) error {
-	return readMsgPack(s, r)
+	return rafty.ReadMsgPack(s, r)
 }
 
 func (s *sBucket) Nested(key string) Bucket {
@@ -211,6 +221,7 @@ func (s *sBucket) View(fn ViewFunc) error {
 
 type Mappy interface {
 	Bucket
+	Bucket(r *Record) Bucket
 	Open(path string) error
 	Close() error
 }
@@ -264,9 +275,8 @@ func Open(opts *Opts) (*mappy, error) {
 	if _, err := os.Stat(opts.Path); os.IsNotExist(err) {
 		os.MkdirAll(opts.Path, 0777)
 	}
-
 	config := raft.DefaultConfig()
-	logStore, _ := NewboltRaft(opts.Path + "/mappy.db")
+	logStore, _ := rafty.NewboltRaft(opts.Path + "/mappy.db")
 	snapshotStore, _ := raft.NewFileSnapshotStore(opts.Path, 1, os.Stdout)
 	addr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1")
 	transport, _ := raft.NewTCPTransport("127.0.0.1", addr, 3, time.Second, os.Stderr)
@@ -293,4 +303,13 @@ func Open(opts *Opts) (*mappy, error) {
 
 func (m mappy) Close() error {
 	return m.rft.Shutdown().Error()
+}
+
+func (m *mappy) Bucket(r *Record) Bucket {
+	bucket := Bucket(m)
+	nested := bucket
+	for _, nest := range r.bucketPath {
+		nested = nested.Nested(nest)
+	}
+	return nested
 }

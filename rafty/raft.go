@@ -1,4 +1,4 @@
-package mappy
+package rafty
 
 import (
 	"errors"
@@ -121,7 +121,7 @@ func (b *boltRaft) FirstIndex() (uint64, error) {
 	if first, _ := curs.First(); first == nil {
 		return 0, nil
 	} else {
-		return bytesToUint64(first), nil
+		return BytesToUint64(first), nil
 	}
 }
 
@@ -137,7 +137,7 @@ func (b *boltRaft) LastIndex() (uint64, error) {
 	if last, _ := curs.Last(); last == nil {
 		return 0, nil
 	} else {
-		return bytesToUint64(last), nil
+		return BytesToUint64(last), nil
 	}
 }
 
@@ -150,12 +150,12 @@ func (b *boltRaft) GetLog(idx uint64, log *raft.Log) error {
 	defer tx.Rollback()
 
 	bucket := tx.Bucket(dbLogs)
-	val := bucket.Get(uint64ToBytes(idx))
+	val := bucket.Get(Uint64ToBytes(idx))
 
 	if val == nil {
 		return raft.ErrLogNotFound
 	}
-	return decodeMsgPack(val, log)
+	return DecodeMsgPack(val, log)
 }
 
 // StoreLog is used to store a single raft log
@@ -172,8 +172,8 @@ func (b *boltRaft) StoreLogs(logs []*raft.Log) error {
 	defer tx.Rollback()
 
 	for _, log := range logs {
-		key := uint64ToBytes(log.Index)
-		val, err := encodeMsgPack(log)
+		key := Uint64ToBytes(log.Index)
+		val, err := EncodeMsgPack(log)
 		if err != nil {
 			return err
 		}
@@ -188,7 +188,7 @@ func (b *boltRaft) StoreLogs(logs []*raft.Log) error {
 
 // DeleteRange is used to delete logs within a given range inclusively.
 func (b *boltRaft) DeleteRange(min, max uint64) error {
-	minKey := uint64ToBytes(min)
+	minKey := Uint64ToBytes(min)
 
 	tx, err := b.conn.Begin(true)
 	if err != nil {
@@ -199,7 +199,7 @@ func (b *boltRaft) DeleteRange(min, max uint64) error {
 	curs := tx.Bucket(dbLogs).Cursor()
 	for k, _ := curs.Seek(minKey); k != nil; k, _ = curs.Next() {
 		// Handle out-of-range log index
-		if bytesToUint64(k) > max {
+		if BytesToUint64(k) > max {
 			break
 		}
 
@@ -247,7 +247,7 @@ func (b *boltRaft) Get(k []byte) ([]byte, error) {
 
 // SetUint64 is like Set, but handles uint64 values
 func (b *boltRaft) SetUint64(key []byte, val uint64) error {
-	return b.Set(key, uint64ToBytes(val))
+	return b.Set(key, Uint64ToBytes(val))
 }
 
 // GetUint64 is like Get, but handles uint64 values
@@ -256,7 +256,7 @@ func (b *boltRaft) GetUint64(key []byte) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return bytesToUint64(val), nil
+	return BytesToUint64(val), nil
 }
 
 // Sync performs an fsync on the database file handle. This is not necessary
