@@ -394,7 +394,7 @@ func Open(opts *Opts) (Mappy, error) {
 				},
 			},
 		}
-		if err := r.BootstrapCluster(configuration).Error(); err != nil && err != raft.ErrCantBootstrap{
+		if err := r.BootstrapCluster(configuration).Error(); err != nil && err != raft.ErrCantBootstrap {
 			return nil, err
 		}
 	}
