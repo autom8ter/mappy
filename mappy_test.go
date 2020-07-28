@@ -66,18 +66,46 @@ func Test(t *testing.T) {
 	mapp.Destroy()
 }
 
-func BenchmarkSet(b *testing.B) {
+
+/* go test -bench Benchmark
+goos: darwin
+goarch: amd64
+pkg: github.com/autom8ter/mappy
+Benchmark/SETUP-8               19399074                52.7 ns/op
+Benchmark/SET-8                 1000000000               0.000002 ns/op
+Benchmark/GET-8                 1000000000               0.000001 ns/op
+ */
+func Benchmark(b *testing.B) {
 	os.RemoveAll(mappy.DefaultOpts.Path)
 	db, err := mappy.Open(mappy.DefaultOpts)
 	if err != nil {
 		b.Fatal(err.Error())
 	}
+	var vals = map[string]string{}
 	defer db.Destroy()
 	var seededRand *rand.Rand = rand.New(rand.NewSource(time.Now().UnixNano()))
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		if err := db.Nest("testing").Set(db.NewRecord(string(seededRand.Int()), string(seededRand.Int()))); err != nil {
-			b.Fatal(err.Error())
+	b.Run("SETUP", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			vals[string(seededRand.Int())] = string(seededRand.Int())
 		}
-	}
+	})
+	b.Run("SET", func(b *testing.B) {
+		for k, v := range vals {
+			if err := db.Nest("testing").Set(db.NewRecord(k, v)); err != nil {
+				b.Fatal(err.Error())
+			}
+		}
+	})
+	b.Run("GET", func(b *testing.B) {
+		for k, v := range vals {
+			res, ok := db.Nest("testing").Get(k)
+			if !ok {
+				b.Fatal("value not found")
+			}
+			if res.Val != v {
+				b.Fatal("value mismatch")
+			}
+		}
+	})
 }
