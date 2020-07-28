@@ -79,7 +79,7 @@ type sBucket struct {
 	onChange   []ChangeHandlerFunc
 	Records    *sync.Map
 	logChan    chan *Log
-	nested     map[string]*sBucket
+	nested     *sync.Map
 }
 
 func (s *sBucket) Path() []string {
@@ -99,22 +99,25 @@ func (s *sBucket) Decode(r io.Reader) error {
 }
 
 func (s *sBucket) Nested(key string) Bucket {
-	if b, ok := s.nested[key]; ok {
-		return b
-	} else {
-		bucketPath := s.BucketPath
-		bucketPath = append(bucketPath, key)
-		bucket := &sBucket{
-			restoring:  s.restoring,
-			logChan:    s.logChan,
-			BucketPath: bucketPath,
-			onChange:   nil,
-			Records:    &sync.Map{},
-			nested: map[string]*sBucket{},
+	v, ok := s.nested.Load(key)
+	if ok {
+		b, ok := v.(*sBucket)
+		if ok {
+			return b
 		}
-		s.nested[key] = bucket
-		return bucket
 	}
+	bucketPath := s.BucketPath
+	bucketPath = append(bucketPath, key)
+	b := &sBucket{
+		restoring:  s.restoring,
+		logChan:    s.logChan,
+		BucketPath: bucketPath,
+		onChange:   nil,
+		Records:    &sync.Map{},
+		nested: &sync.Map{},
+	}
+	s.nested.Store(key, b)
+	return b
 }
 
 func (s *sBucket) bucket() Bucket {
@@ -268,7 +271,7 @@ func Open(opts *Opts) (Mappy, error) {
 			BucketPath: nil,
 			onChange:   nil,
 			Records:    &sync.Map{},
-			nested: map[string]*sBucket{},
+			nested: &sync.Map{},
 		},
 	}
 	go func() {
