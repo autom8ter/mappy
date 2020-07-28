@@ -11,12 +11,25 @@ func Test(t *testing.T) {
 	if err != nil {
 		t.Fatal(err.Error())
 	}
-	if closer, err := mapp.Restore(); err != nil {
+	err = mapp.Restore()
+	if err != nil {
 		t.Fatal(err.Error())
-	} else {
-		closer()
 	}
+
 	bucket := mapp.Nested("users").Nested("colemanword@gmail.com")
+	t.Log(bucket.Path())
+	counter := 0
+	if err := bucket.View(func(record *mappy.Record) error {
+		counter++
+		t.Logf("%v %s\n", counter, record.JSON())
+		return nil
+	}); err != nil {
+		t.Fatal(err.Error())
+	}
+	if counter == 0 {
+		t.Fatal("failed restore")
+	}
+
 	if err := bucket.Set(&mappy.Record{
 		Key: "name",
 		Val: "Coleman Word",
@@ -35,12 +48,12 @@ func Test(t *testing.T) {
 		t.Fatal(err.Error())
 	}
 	time.Sleep(1 * time.Second)
-	if err := mapp.Replay(0,3, func(lg *mappy.Log) error {
+	if err := mapp.Replay(0, 5, func(lg *mappy.Log) error {
 		switch lg.Op {
 		case mappy.DELETE:
-			t.Logf("DELETE: %s\n", lg.Old.Key)
+			t.Logf("DELETE: %v\n", lg.Record.JSON())
 		case mappy.SET:
-			t.Logf("SET: %s\n", lg.New.Key)
+			t.Logf("SET: %v\n", lg.Record.JSON())
 		}
 		return nil
 	}); err != nil {
@@ -49,4 +62,5 @@ func Test(t *testing.T) {
 	if err := mapp.Close(); err != nil {
 		t.Fatal(err.Error())
 	}
+	//mapp.Destroy()
 }
