@@ -52,9 +52,9 @@ func Test(t *testing.T) {
 	if err := mapp.Replay(0, 2, func(lg *mappy.Log) error {
 		switch lg.Op {
 		case mappy.DELETE:
-			t.Logf("DELETE: %v\n", lg.Record.JSON())
+			t.Logf("DELETE: %v %v\n", lg.Sequence, lg.Record.JSON())
 		case mappy.SET:
-			t.Logf("SET: %v\n", lg.Record.JSON())
+			t.Logf("SET: %v %v\n", lg.Sequence, lg.Record.JSON())
 		}
 		return nil
 	}); err != nil {

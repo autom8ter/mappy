@@ -154,18 +154,16 @@ func (s *sBucket) getRecord(key string) (*Record, bool) {
 
 func (s *sBucket) Del(key string) error {
 	s.Records.Delete(key)
-	if !s.disableLogs {
-		before, _ := s.getRecord(key)
-		lg := &Log{
-			Op:        DELETE,
-			Record:    before,
-			CreatedAt: time.Now(),
-		}
-		s.logChan <- lg
-		for _, fn := range s.onChange {
-			if err := fn(lg); err != nil {
-				return err
-			}
+	before, _ := s.getRecord(key)
+	lg := &Log{
+		Op:        DELETE,
+		Record:    before,
+		CreatedAt: time.Now(),
+	}
+	s.logChan <- lg
+	for _, fn := range s.onChange {
+		if err := fn(lg); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -181,20 +179,17 @@ func (s *sBucket) Set(record *Record) error {
 	}
 	record.BucketPath = s.BucketPath
 	s.Records.Store(record.Key, record)
-	if !s.disableLogs {
-		lg := &Log{
-			Op:        SET,
-			Record:    record,
-			CreatedAt: time.Now(),
-		}
-		s.logChan <- lg
-		for _, fn := range s.onChange {
-			if err := fn(lg); err != nil {
-				return err
-			}
+	lg := &Log{
+		Op:        SET,
+		Record:    record,
+		CreatedAt: time.Now(),
+	}
+	s.logChan <- lg
+	for _, fn := range s.onChange {
+		if err := fn(lg); err != nil {
+			return err
 		}
 	}
-
 	return nil
 }
 
@@ -237,6 +232,7 @@ type mappy struct {
 	db *bbolt.DB
 	*sBucket
 	o         *Opts
+	closing   bool
 	done      bool
 }
 
@@ -281,9 +277,12 @@ func Open(opts *Opts) (Mappy, error) {
 	}
 	go func() {
 		wg := sync.WaitGroup{}
-		for !m.done {
+		for !m.closing {
 			select {
 			case msg := <-m.logChan:
+				if msg == nil || m.disableLogs{
+					continue
+				}
 				wg.Add(1)
 				go func(lg *Log) {
 					defer wg.Done()
@@ -306,6 +305,7 @@ func Open(opts *Opts) (Mappy, error) {
 			}
 		}
 		wg.Wait()
+		m.done = true
 	}()
 	if opts.Restore {
 		return m, m.Restore()
@@ -332,10 +332,17 @@ func (m *sBucket) Flush() error {
 func (m *mappy) Close() error {
 	log.Println("mappy: closing...")
 	close(m.logChan)
-	m.done = true
-	if err := m.db.Close(); err != nil {
-		log.Printf("mappy: %s\n", err.Error())
+	m.closing = true
+	for  {
+		if m.done {
+			if err := m.db.Close(); err != nil {
+				log.Printf("mappy: %s\n", err.Error())
+			}
+			break
+		}
 	}
+
+
 	return nil
 }
 
