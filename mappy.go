@@ -7,12 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"github.com/autom8ter/mappy/cmap"
-	"github.com/autom8ter/mappy/rafty"
-	"github.com/hashicorp/go-hclog"
-	"github.com/hashicorp/raft"
 	"go.etcd.io/bbolt"
 	"io"
-	"net"
+	"log"
 	"os"
 	"time"
 )
@@ -37,19 +34,22 @@ var Done = errors.New("mappy: done")
 type Record struct {
 	Key        string      `json:"key"`
 	Val        interface{} `json:"val"`
-	Exp        int64       `json:"exp"`
+	Exp        time.Time   `json:"exp"`
 	bucketPath []string
 	updatedAt  int64
 }
 
 func (r *Record) toStored() *storedRecord {
-	return &storedRecord{
+	s := &storedRecord{
 		BucketPath: r.bucketPath,
 		Key:        r.Key,
 		Val:        r.Val,
-		Exp:        r.Exp,
 		UpdatedAt:  r.updatedAt,
 	}
+	if r.Exp.After(time.Now()) {
+		s.Exp = r.Exp.Unix()
+	}
+	return s
 }
 
 func (r *Record) BucketPath() []string {
@@ -74,37 +74,32 @@ type storedRecord struct {
 }
 
 type Log struct {
+	Sequence  int
 	Op        Op
 	New       *Record
 	Old       *Record
 	CreatedAt int64
 }
 
-func fromLog(lg *raft.Log) (*Log, error) {
-	var stored Log
-	if err := gob.NewDecoder(bytes.NewBuffer(lg.Data)).Decode(&stored); err != nil {
-		return nil, err
-	}
-	return &stored, nil
-}
-
 func (l *Log) encode() (*bytes.Buffer, error) {
 	buf := bytes.NewBuffer(nil)
-	return buf, gob.NewEncoder(buf).Encode(buf)
+	return buf, gob.NewEncoder(buf).Encode(l)
+}
+
+func (l *Log) decode(r io.Reader) error {
+	return gob.NewDecoder(r).Decode(l)
 }
 
 type ViewFunc func(record *Record) error
-
+type ReplayFunc func(lg *Log) error
 type ChangeHandlerFunc func(log *Log) error
 
 type Bucket interface {
 	Nested(key string) Bucket
 	Delete(key string) error
 	Len() int
-	OnChange(fns ...ChangeHandlerFunc)
-	HandleChange(log *Log) error
 	Get(key string) (value *Record, ok bool)
-	Set(record *Record) *Result
+	Set(record *Record) error
 	View(fn ViewFunc) error
 	Decode(r io.Reader) error
 	Encode(w io.Writer) error
@@ -112,23 +107,14 @@ type Bucket interface {
 }
 
 type sBucket struct {
-	logz *bbolt.Bucket
-	BucketPath []string `json:"bucketPath"`
+	BucketPath []string
 	onChange   []ChangeHandlerFunc
-	Records    *cmap.Map `json:"records"`
+	Records    *cmap.Map
+	logChan    chan *Log
 }
 
 func (s *sBucket) Store() *cmap.Map {
 	return s.Records
-}
-
-func (s *sBucket) HandleChange(log *Log) error {
-	for _, fn := range s.onChange {
-		if err := fn(log); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (s *sBucket) Encode(w io.Writer) error {
@@ -145,6 +131,7 @@ func (s *sBucket) Nested(key string) Bucket {
 	bucketPath = append(bucketPath, key)
 	if !ok {
 		return &sBucket{
+			logChan:    s.logChan,
 			BucketPath: bucketPath,
 			onChange:   nil,
 			Records:    &cmap.Map{},
@@ -153,6 +140,7 @@ func (s *sBucket) Nested(key string) Bucket {
 	bucket, ok := val.(Bucket)
 	if !ok {
 		return &sBucket{
+			logChan:    s.logChan,
 			BucketPath: bucketPath,
 			onChange:   nil,
 			Records:    &cmap.Map{},
@@ -196,20 +184,15 @@ func (s *sBucket) Delete(key string) error {
 		Old:       before,
 		CreatedAt: time.Now().Unix(),
 	}
-	buf, err := lg.encode()
-	if err != nil {
-		return err
-	}
-	seq, _ := s.logz.NextSequence()
-	if err := s.logz.Put(rafty.Uint64ToBytes(seq), buf.Bytes()); err != nil {
-		return err
-	}
+	s.logChan <- lg
 	s.Records.Delete(key)
-	return nil
-}
+	for _, fn := range s.onChange {
+		if err := fn(lg); err != nil {
+			return err
+		}
+	}
 
-func (s *sBucket) OnChange(fns ...ChangeHandlerFunc) {
-	s.onChange = append(s.onChange, fns...)
+	return nil
 }
 
 func (s *sBucket) Get(key string) (*Record, bool) {
@@ -217,6 +200,7 @@ func (s *sBucket) Get(key string) (*Record, bool) {
 }
 
 func (s *sBucket) Set(record *Record) error {
+	record.updatedAt = time.Now().Unix()
 	before, _ := s.getRecord(record.Key)
 	lg := &Log{
 		Op:        SET,
@@ -224,16 +208,14 @@ func (s *sBucket) Set(record *Record) error {
 		Old:       before,
 		CreatedAt: time.Now().Unix(),
 	}
-	buf, err := lg.encode()
-	if err != nil {
-		return err
-	}
-	seq, _ := s.logz.NextSequence()
-	if err := s.logz.Put(rafty.Uint64ToBytes(seq), buf.Bytes()); err != nil {
-		return err
-	}
+	s.logChan <- lg
 	s.Records.Store(record.Key, record)
-
+	for _, fn := range s.onChange {
+		if err := fn(lg); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *sBucket) View(fn ViewFunc) error {
@@ -261,81 +243,88 @@ func (s *sBucket) View(fn ViewFunc) error {
 
 type Mappy interface {
 	Bucket
+	Replay(min, max time.Time, fn ReplayFunc) error
 	Bucket(r *Record) Bucket
 	Close() error
 	Destroy() error
 }
 
 type mappy struct {
+	db *bbolt.DB
 	*sBucket
-	o        *Opts
-	rft      *raft.Raft
-	logger   hclog.Logger
-	shutdown bool
-}
-
-func (m *mappy) Release() {
-
+	o    *Opts
+	done chan (struct{})
 }
 
 type Opts struct {
-	Leader            bool
-	Path              string
-	LocalID           string
-	LogLevel          string
-	Listen            string
-	MaxPool           int
-	SnapshotRetention int
-	Timeout           time.Duration
+	Path string
 }
 
 var DefaultOpts = &Opts{
-	Leader:            true,
-	Path:              "/tmp/mappy",
-	LocalID:           "node0",
-	LogLevel:          "DEBUG",
-	Listen:            fmt.Sprintf("127.0.0.1:8765"),
-	MaxPool:           5,
-	SnapshotRetention: 1,
-	Timeout:           5 * time.Second,
+	Path: "/tmp/mappy",
 }
 
 func Open(opts *Opts) (Mappy, error) {
 	if _, err := os.Stat(opts.Path); os.IsNotExist(err) {
 		os.MkdirAll(opts.Path, 0777)
 	}
-	config := raft.DefaultConfig()
-	logStore, err := bbolt.Open(opts.Path + "/mappy.db", 0700, bbolt.DefaultOptions)
+	logStore, err := bbolt.Open(opts.Path+"/mappy.db", 0700, bbolt.DefaultOptions)
 	if err != nil {
 		return nil, err
 	}
-	var bucket *bbolt.Bucket
-	logStore.Update(func(tx *bbolt.Tx) error {
-		var err error
-		bucket, err = tx.CreateBucketIfNotExists([]byte("logs/"))
+	if err := logStore.Update(func(tx *bbolt.Tx) error {
+		_, err := tx.CreateBucketIfNotExists([]byte("logs"))
 		if err != nil {
 			return err
 		}
 		return nil
-	})
+	}); err != nil {
+		return nil, err
+	}
 	m := &mappy{
-		logger: config.Logger,
+		db:   logStore,
+		o:    opts,
+		done: make(chan struct{}, 1),
 		sBucket: &sBucket{
-			logz: bucket,
+			logChan:    make(chan *Log),
 			BucketPath: nil,
 			onChange:   nil,
 			Records:    &cmap.Map{},
 		},
 	}
-	m.o = opts
+	go func() {
+		for {
+			select {
+			case <-m.done:
+				log.Println("mappy: closing...")
+				if err := m.db.Close(); err != nil {
+					log.Printf("mappy: %s\n", err.Error())
+				}
+				break
+			case lg := <-m.logChan:
+				if err := m.db.Update(func(tx *bbolt.Tx) error {
+					bucket := tx.Bucket([]byte("logs"))
+					seq, _ := bucket.NextSequence()
+					lg.Sequence = int(seq)
+					buf, err := lg.encode()
+					if err != nil {
+						return err
+					}
+					if err := bucket.Put(uint64ToBytes(uint64(time.Now().UnixNano())), buf.Bytes()); err != nil {
+						return err
+					}
+					return nil
+				}); err != nil {
+					log.Printf("mappy: %s\n", err.Error())
+				}
+			}
+		}
+	}()
 	return m, nil
 }
 
 func (m *mappy) Close() error {
-	if err := m.rft.Shutdown().Error(); err != nil {
-		return err
-	}
-	m.shutdown = true
+	m.done <- struct{}{}
 	return nil
 }
 
@@ -348,39 +337,25 @@ func (m *mappy) Bucket(r *Record) Bucket {
 	return nested
 }
 
-type Raft interface {
-	AddPeer(addr string) error
-	Stats() map[string]string
-	State() string
-}
+func (m *mappy) Replay(min, max time.Time, fn ReplayFunc) error {
+	return m.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte("logs"))
+		c := bucket.Cursor()
+		// Iterate over the 90's.
+		for k, v := c.Seek(uint64ToBytes(uint64(min.UnixNano()))); k != nil && bytes.Compare(k, uint64ToBytes(uint64(max.UnixNano()))) <= 0; k, v = c.Next() {
+			lg := &Log{}
+			if err := lg.decode(bytes.NewBuffer(v)); err != nil {
+				return err
+			}
+			if err := fn(lg); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 
-type rft struct {
-	impl *raft.Raft
-}
-
-func (m *rft) AddPeer(addr string) error {
-	return m.impl.AddPeer(raft.ServerAddress(addr)).Error()
-}
-
-func (m *rft) Stats() map[string]string {
-	return m.impl.Stats()
-}
-
-func (m *rft) State() string {
-	return m.impl.State().String()
-}
-
-type Result struct {
-	Index uint64
-	Log   *Log
-	Err   error
 }
 
 func (m *mappy) Destroy() error {
-	if !m.shutdown {
-		if err := m.Close(); err != nil {
-			return err
-		}
-	}
 	return os.RemoveAll(m.o.Path)
 }

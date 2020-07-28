@@ -14,18 +14,31 @@ func Test(t *testing.T) {
 	time.Sleep(3 * time.Second)
 	defer mapp.Destroy()
 	bucket := mapp.Nested("users").Nested("colemanword@gmail.com")
-	result := bucket.Set(&mappy.Record{
+	if err := bucket.Set(&mappy.Record{
 		Key: "name",
 		Val: "Coleman Word",
-		Exp: time.Now().Add(5 * time.Minute).Unix(),
-	})
-	t.Log(result.Err)
+		Exp: time.Now().Add(5 * time.Minute),
+	}); err != nil {
+		t.Fatal(err.Error())
+	}
 	res, _ := bucket.Get("name")
 	if res.Val != "Coleman Word" {
 		t.Fatalf("expected: %s got: %s", "Coleman Word", res.Val)
 	}
 	if err := bucket.View(func(record *mappy.Record) error {
 		t.Logf("record: %s\n", record.JSON())
+		return nil
+	}); err != nil {
+		t.Fatal(err.Error())
+	}
+	time.Sleep(1 * time.Second)
+	if err := mapp.Replay(time.Now().Truncate(1*time.Minute), time.Now().Add(1*time.Minute), func(lg *mappy.Log) error {
+		switch lg.Op {
+		case mappy.DELETE:
+			t.Logf("DELETE: %s\n", lg.Old.Key)
+		case mappy.SET:
+			t.Logf("SET: %s\n", lg.New.Key)
+		}
 		return nil
 	}); err != nil {
 		t.Fatal(err.Error())
