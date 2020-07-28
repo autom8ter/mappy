@@ -62,21 +62,21 @@ type ChangeHandlerFunc func(log *Log) error
 
 type Bucket interface {
 	Path() []string
-	Nested(key string) Bucket
-	Delete(key string) error
+	NewRecord(key string, val interface{}) *Record
+	Nest(key string) Bucket
+	Del(key string) error
+	Flush() error
 	Len() int
 	Get(key string) (value *Record, ok bool)
 	Set(record *Record) error
 	View(fn ViewFunc) error
-	Decode(r io.Reader) error
-	Encode(w io.Writer) error
-	Store() *sync.Map
+	History(bool)
 }
 
 type sBucket struct {
-	restoring  bool
 	BucketPath []string
 	onChange   []ChangeHandlerFunc
+	disableLogs bool
 	Records    *sync.Map
 	logChan    chan *Log
 	nested     *sync.Map
@@ -86,19 +86,24 @@ func (s *sBucket) Path() []string {
 	return s.BucketPath
 }
 
+func (s *sBucket) History(enable bool) {
+	s.disableLogs = enable
+}
+
+func (s *sBucket) NewRecord(key string, val interface{}) *Record {
+	return &Record{
+		Key:        key,
+		Val:        val,
+		BucketPath: s.BucketPath,
+		UpdatedAt:  time.Now(),
+	}
+}
+
 func (s *sBucket) Store() *sync.Map {
 	return s.Records
 }
 
-func (s *sBucket) Encode(w io.Writer) error {
-	return s.Encode(w)
-}
-
-func (s *sBucket) Decode(r io.Reader) error {
-	return s.Decode(r)
-}
-
-func (s *sBucket) Nested(key string) Bucket {
+func (s *sBucket) Nest(key string) Bucket {
 	v, ok := s.nested.Load(key)
 	if ok {
 		b, ok := v.(*sBucket)
@@ -109,12 +114,12 @@ func (s *sBucket) Nested(key string) Bucket {
 	bucketPath := s.BucketPath
 	bucketPath = append(bucketPath, key)
 	b := &sBucket{
-		restoring:  s.restoring,
+		disableLogs:  s.disableLogs,
 		logChan:    s.logChan,
 		BucketPath: bucketPath,
 		onChange:   nil,
 		Records:    &sync.Map{},
-		nested: &sync.Map{},
+		nested:     &sync.Map{},
 	}
 	s.nested.Store(key, b)
 	return b
@@ -147,9 +152,9 @@ func (s *sBucket) getRecord(key string) (*Record, bool) {
 	return record, true
 }
 
-func (s *sBucket) Delete(key string) error {
+func (s *sBucket) Del(key string) error {
 	s.Records.Delete(key)
-	if !s.restoring {
+	if !s.disableLogs {
 		before, _ := s.getRecord(key)
 		lg := &Log{
 			Op:        DELETE,
@@ -171,12 +176,12 @@ func (s *sBucket) Get(key string) (*Record, bool) {
 }
 
 func (s *sBucket) Set(record *Record) error {
-	if !s.restoring {
+	if !s.disableLogs {
 		record.UpdatedAt = time.Now()
 	}
 	record.BucketPath = s.BucketPath
 	s.Records.Store(record.Key, record)
-	if !s.restoring {
+	if !s.disableLogs {
 		lg := &Log{
 			Op:        SET,
 			Record:    record,
@@ -232,12 +237,12 @@ type mappy struct {
 	db *bbolt.DB
 	*sBucket
 	o         *Opts
-	done      chan (struct{})
-	restoring bool
+	done      bool
 }
 
 type Opts struct {
-	Path string
+	Path    string
+	Restore bool
 }
 
 var DefaultOpts = &Opts{
@@ -264,27 +269,24 @@ func Open(opts *Opts) (Mappy, error) {
 	m := &mappy{
 		db:   logStore,
 		o:    opts,
-		done: make(chan struct{}, 1),
+		done: false,
 		sBucket: &sBucket{
-			restoring:  false,
+			disableLogs:  false,
 			logChan:    make(chan *Log),
 			BucketPath: nil,
 			onChange:   nil,
 			Records:    &sync.Map{},
-			nested: &sync.Map{},
+			nested:     &sync.Map{},
 		},
 	}
 	go func() {
-		for {
+		wg := sync.WaitGroup{}
+		for !m.done {
 			select {
-			case <-m.done:
-				log.Println("mappy: closing...")
-				if err := m.db.Close(); err != nil {
-					log.Printf("mappy: %s\n", err.Error())
-				}
-				break
-			case lg := <-m.logChan:
-				if !m.restoring {
+			case msg := <-m.logChan:
+				wg.Add(1)
+				go func(lg *Log) {
+					defer wg.Done()
 					if err := m.db.Update(func(tx *bbolt.Tx) error {
 						bucket := tx.Bucket([]byte("logs"))
 						seq, _ := bucket.NextSequence()
@@ -300,23 +302,48 @@ func Open(opts *Opts) (Mappy, error) {
 					}); err != nil {
 						log.Printf("mappy: %s\n", err.Error())
 					}
-				}
+				}(msg)
 			}
 		}
+		wg.Wait()
 	}()
+	if opts.Restore {
+		return m, m.Restore()
+	}
 	return m, nil
 }
 
+func (m *sBucket) Flush() error {
+	m.nested.Range(func(key, value interface{}) bool {
+		if b, ok := value.(*sBucket); ok {
+			b.Flush()
+		} else {
+			m.nested.Delete(key)
+		}
+		return true
+	})
+	m.Records.Range(func(key, value interface{}) bool {
+		m.Records.Delete(key)
+		return true
+	})
+	return nil
+}
+
 func (m *mappy) Close() error {
-	m.done <- struct{}{}
+	log.Println("mappy: closing...")
+	close(m.logChan)
+	m.done = true
+	if err := m.db.Close(); err != nil {
+		log.Printf("mappy: %s\n", err.Error())
+	}
 	return nil
 }
 
 func (m *mappy) Bucket(path []string) Bucket {
-	var bucket = m.Nested(path[0])
+	var bucket = m.Nest(path[0])
 	if len(path) >= 2 {
-		for _, p := range  path[1:] {
-			bucket = bucket.Nested(p)
+		for _, p := range path[1:] {
+			bucket = bucket.Nest(p)
 		}
 	}
 	return bucket
@@ -341,8 +368,8 @@ func (m *mappy) Replay(min, max int, fn ReplayFunc) error {
 }
 
 func (m *mappy) Restore() error {
-	m.restoring = true
-	defer func() { m.restoring = false }()
+	m.History(false)
+	defer m.History(true)
 	if err := m.db.View(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte("logs"))
 		c := bucket.Cursor()
@@ -352,9 +379,10 @@ func (m *mappy) Restore() error {
 				return err
 			}
 			b := m.Bucket(lg.Record.BucketPath)
+			defer b.History(true)
 			switch lg.Op {
 			case DELETE:
-				if err := b.Delete(lg.Record.Key); err != nil {
+				if err := b.Del(lg.Record.Key); err != nil {
 					return err
 				}
 			case SET:
@@ -371,5 +399,10 @@ func (m *mappy) Restore() error {
 }
 
 func (m *mappy) Destroy() error {
+	if !m.done {
+		if err := m.Close(); err != nil {
+			return err
+		}
+	}
 	return os.RemoveAll(m.o.Path)
 }
