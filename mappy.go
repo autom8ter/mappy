@@ -15,10 +15,8 @@ import (
 )
 
 func init() {
-	gob.Register(&sBucket{})
-	gob.Register(&mappy{})
-	gob.Register(&Record{})
-	gob.Register(&storedRecord{})
+	gob.Register(&StoredRecord{})
+	gob.Register(&Log{})
 }
 
 type Op int
@@ -37,8 +35,8 @@ type Record struct {
 	updatedAt  time.Time
 }
 
-func (r *Record) toStored() *storedRecord {
-	s := &storedRecord{
+func (r *Record) toStored() *StoredRecord {
+	s := &StoredRecord{
 		BucketPath: r.bucketPath,
 		Key:        r.Key,
 		Val:        r.Val,
@@ -60,18 +58,27 @@ func (r *Record) JSON() string {
 	return fmt.Sprintf("%s", bits)
 }
 
-type storedRecord struct {
+type StoredRecord struct {
 	BucketPath []string    `json:"bucketPath"`
 	Key        string      `json:"key"`
 	Val        interface{} `json:"val"`
 	UpdatedAt  time.Time   `json:"updatedAt"`
 }
 
+func (s *StoredRecord) Record() *Record {
+	return &Record{
+		Key:        s.Key,
+		Val:        s.Val,
+		bucketPath: s.BucketPath,
+		updatedAt:  s.UpdatedAt,
+	}
+}
+
 type Log struct {
 	Sequence  int
 	Op        Op
-	New       *Record
-	Old       *Record
+	New       *StoredRecord
+	Old       *StoredRecord
 	CreatedAt time.Time
 }
 
@@ -180,7 +187,7 @@ func (s *sBucket) Delete(key string) error {
 		lg := &Log{
 			Op:        DELETE,
 			New:       nil,
-			Old:       before,
+			Old:       before.toStored(),
 			CreatedAt: time.Now(),
 		}
 		s.logChan <- lg
@@ -206,8 +213,8 @@ func (s *sBucket) Set(record *Record) error {
 		before, _ := s.getRecord(record.Key)
 		lg := &Log{
 			Op:        SET,
-			New:       record,
-			Old:       before,
+			New:       record.toStored(),
+			Old:       before.toStored(),
 			CreatedAt: time.Now(),
 		}
 		s.logChan <- lg
@@ -247,14 +254,15 @@ func (s *sBucket) View(fn ViewFunc) error {
 
 type Mappy interface {
 	Bucket
-	Replay(min, max time.Time, fn ReplayFunc) error
-	Restore() error
+	Replay(min, max int, fn ReplayFunc) error
+	Restore() (func(), error)
 	Bucket(r *Record) Bucket
 	Close() error
 	Destroy() error
 }
 
 type mappy struct {
+	mu *sync.Mutex
 	db *bbolt.DB
 	*sBucket
 	o         *Opts
@@ -318,7 +326,7 @@ func Open(opts *Opts) (Mappy, error) {
 						if err != nil {
 							return err
 						}
-						if err := bucket.Put(uint64ToBytes(uint64(time.Now().UnixNano())), buf.Bytes()); err != nil {
+						if err := bucket.Put(uint64ToBytes(seq), buf.Bytes()); err != nil {
 							return err
 						}
 						return nil
@@ -346,12 +354,12 @@ func (m *mappy) Bucket(r *Record) Bucket {
 	return nested
 }
 
-func (m *mappy) Replay(min, max time.Time, fn ReplayFunc) error {
+func (m *mappy) Replay(min, max int, fn ReplayFunc) error {
 	return m.db.View(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte("logs"))
 		c := bucket.Cursor()
 		// Iterate over the 90's.
-		for k, v := c.Seek(uint64ToBytes(uint64(min.UnixNano()))); k != nil && bytes.Compare(k, uint64ToBytes(uint64(max.UnixNano()))) <= 0; k, v = c.Next() {
+		for k, v := c.Seek(uint64ToBytes(uint64(min))); k != nil && bytes.Compare(k, uint64ToBytes(uint64(max))) <= 0; k, v = c.Next() {
 			lg := &Log{}
 			if err := lg.decode(bytes.NewBuffer(v)); err != nil {
 				return err
@@ -365,33 +373,32 @@ func (m *mappy) Replay(min, max time.Time, fn ReplayFunc) error {
 
 }
 
-func (m *mappy) Restore() error {
+func (m *mappy) Restore() (func(), error) {
 	m.restoring = true
-	defer func() {
-		m.restoring = false
-	}()
-	return m.db.View(func(tx *bbolt.Tx) error {
-		bucket := tx.Bucket([]byte("logs"))
-		c := bucket.Cursor()
-		// Iterate over the 90's.
-		for k, v := c.First(); k != nil; k, v = c.Next() {
-			lg := &Log{}
-			if err := lg.decode(bytes.NewBuffer(v)); err != nil {
-				return err
-			}
-			switch lg.Op {
-			case DELETE:
-				if err := m.Delete(lg.Old.Key); err != nil {
+	return func() {
+			m.restoring = false
+		}, m.db.View(func(tx *bbolt.Tx) error {
+			bucket := tx.Bucket([]byte("logs"))
+			c := bucket.Cursor()
+			for k, v := c.First(); k != nil; k, v = c.Next() {
+				fmt.Println(string(k))
+				lg := &Log{}
+				if err := lg.decode(bytes.NewBuffer(v)); err != nil {
 					return err
 				}
-			case SET:
-				if err := m.Set(lg.New); err != nil {
-					return err
+				switch lg.Op {
+				case DELETE:
+					if err := m.Bucket(lg.Old.Record()).Delete(lg.Old.Key); err != nil {
+						return err
+					}
+				case SET:
+					if err := m.Bucket(lg.New.Record()).Set(lg.New.Record()); err != nil {
+						return err
+					}
 				}
 			}
-		}
-		return nil
-	})
+			return nil
+		})
 }
 
 func (m *mappy) Destroy() error {
