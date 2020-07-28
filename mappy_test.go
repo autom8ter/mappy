@@ -11,16 +11,17 @@ func Test(t *testing.T) {
 	if err != nil {
 		t.Fatal(err.Error())
 	}
-	time.Sleep(3 * time.Second)
-	defer mapp.Destroy()
-	bucket := mapp.Nested("users").Nested("colemanword@gmail.com")
-	if err := bucket.Set(&mappy.Record{
-		Key: "name",
-		Val: "Coleman Word",
-		Exp: time.Now().Add(5 * time.Minute),
-	}); err != nil {
+	if err := mapp.Restore(); err != nil {
 		t.Fatal(err.Error())
 	}
+	bucket := mapp.Nested("users").Nested("colemanword@gmail.com")
+	//if err := bucket.Set(&mappy.Record{
+	//	Key: "name",
+	//	Val: "Coleman Word",
+	//}); err != nil {
+	//	t.Fatal(err.Error())
+	//}
+	time.Sleep(1 * time.Second)
 	res, _ := bucket.Get("name")
 	if res.Val != "Coleman Word" {
 		t.Fatalf("expected: %s got: %s", "Coleman Word", res.Val)

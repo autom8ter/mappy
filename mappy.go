@@ -6,11 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/autom8ter/mappy/cmap"
 	"go.etcd.io/bbolt"
 	"io"
 	"log"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -24,7 +24,6 @@ func init() {
 type Op int
 
 const (
-	EXPIRE Op = 1
 	DELETE Op = 2
 	SET    Op = 3
 )
@@ -34,9 +33,8 @@ var Done = errors.New("mappy: done")
 type Record struct {
 	Key        string      `json:"key"`
 	Val        interface{} `json:"val"`
-	Exp        time.Time   `json:"exp"`
 	bucketPath []string
-	updatedAt  int64
+	updatedAt  time.Time
 }
 
 func (r *Record) toStored() *storedRecord {
@@ -46,9 +44,6 @@ func (r *Record) toStored() *storedRecord {
 		Val:        r.Val,
 		UpdatedAt:  r.updatedAt,
 	}
-	if r.Exp.After(time.Now()) {
-		s.Exp = r.Exp.Unix()
-	}
 	return s
 }
 
@@ -57,7 +52,7 @@ func (r *Record) BucketPath() []string {
 }
 
 func (r *Record) UpdatedAt() time.Time {
-	return time.Unix(0, r.updatedAt)
+	return r.updatedAt
 }
 
 func (r *Record) JSON() string {
@@ -69,8 +64,7 @@ type storedRecord struct {
 	BucketPath []string    `json:"bucketPath"`
 	Key        string      `json:"key"`
 	Val        interface{} `json:"val"`
-	Exp        int64       `json:"exp"`
-	UpdatedAt  int64       `json:"updatedAt"`
+	UpdatedAt  time.Time   `json:"updatedAt"`
 }
 
 type Log struct {
@@ -78,7 +72,7 @@ type Log struct {
 	Op        Op
 	New       *Record
 	Old       *Record
-	CreatedAt int64
+	CreatedAt time.Time
 }
 
 func (l *Log) encode() (*bytes.Buffer, error) {
@@ -103,17 +97,18 @@ type Bucket interface {
 	View(fn ViewFunc) error
 	Decode(r io.Reader) error
 	Encode(w io.Writer) error
-	Store() *cmap.Map
+	Store() *sync.Map
 }
 
 type sBucket struct {
+	restoring  bool
 	BucketPath []string
 	onChange   []ChangeHandlerFunc
-	Records    *cmap.Map
+	Records    *sync.Map
 	logChan    chan *Log
 }
 
-func (s *sBucket) Store() *cmap.Map {
+func (s *sBucket) Store() *sync.Map {
 	return s.Records
 }
 
@@ -131,19 +126,21 @@ func (s *sBucket) Nested(key string) Bucket {
 	bucketPath = append(bucketPath, key)
 	if !ok {
 		return &sBucket{
+			restoring:  s.restoring,
 			logChan:    s.logChan,
 			BucketPath: bucketPath,
 			onChange:   nil,
-			Records:    &cmap.Map{},
+			Records:    &sync.Map{},
 		}
 	}
 	bucket, ok := val.(Bucket)
 	if !ok {
 		return &sBucket{
+			restoring:  s.restoring,
 			logChan:    s.logChan,
 			BucketPath: bucketPath,
 			onChange:   nil,
-			Records:    &cmap.Map{},
+			Records:    &sync.Map{},
 		}
 	}
 	return bucket
@@ -177,21 +174,22 @@ func (s *sBucket) getRecord(key string) (*Record, bool) {
 }
 
 func (s *sBucket) Delete(key string) error {
-	before, _ := s.getRecord(key)
-	lg := &Log{
-		Op:        DELETE,
-		New:       nil,
-		Old:       before,
-		CreatedAt: time.Now().Unix(),
-	}
-	s.logChan <- lg
 	s.Records.Delete(key)
-	for _, fn := range s.onChange {
-		if err := fn(lg); err != nil {
-			return err
+	if !s.restoring {
+		before, _ := s.getRecord(key)
+		lg := &Log{
+			Op:        DELETE,
+			New:       nil,
+			Old:       before,
+			CreatedAt: time.Now(),
+		}
+		s.logChan <- lg
+		for _, fn := range s.onChange {
+			if err := fn(lg); err != nil {
+				return err
+			}
 		}
 	}
-
 	return nil
 }
 
@@ -200,27 +198,33 @@ func (s *sBucket) Get(key string) (*Record, bool) {
 }
 
 func (s *sBucket) Set(record *Record) error {
-	record.updatedAt = time.Now().Unix()
-	before, _ := s.getRecord(record.Key)
-	lg := &Log{
-		Op:        SET,
-		New:       record,
-		Old:       before,
-		CreatedAt: time.Now().Unix(),
+	if !s.restoring {
+		record.updatedAt = time.Now()
 	}
-	s.logChan <- lg
 	s.Records.Store(record.Key, record)
-	for _, fn := range s.onChange {
-		if err := fn(lg); err != nil {
-			return err
+	if !s.restoring {
+		before, _ := s.getRecord(record.Key)
+		lg := &Log{
+			Op:        SET,
+			New:       record,
+			Old:       before,
+			CreatedAt: time.Now(),
+		}
+		s.logChan <- lg
+
+		for _, fn := range s.onChange {
+			if err := fn(lg); err != nil {
+				return err
+			}
 		}
 	}
+
 	return nil
 }
 
 func (s *sBucket) View(fn ViewFunc) error {
 	var errs []error
-	s.Records.Range(func(key string, value interface{}) bool {
+	s.Records.Range(func(key interface{}, value interface{}) bool {
 		record, _ := value.(*Record)
 		if err := fn(record); err != nil {
 			if err == Done {
@@ -244,6 +248,7 @@ func (s *sBucket) View(fn ViewFunc) error {
 type Mappy interface {
 	Bucket
 	Replay(min, max time.Time, fn ReplayFunc) error
+	Restore() error
 	Bucket(r *Record) Bucket
 	Close() error
 	Destroy() error
@@ -252,8 +257,9 @@ type Mappy interface {
 type mappy struct {
 	db *bbolt.DB
 	*sBucket
-	o    *Opts
-	done chan (struct{})
+	o         *Opts
+	done      chan (struct{})
+	restoring bool
 }
 
 type Opts struct {
@@ -286,10 +292,11 @@ func Open(opts *Opts) (Mappy, error) {
 		o:    opts,
 		done: make(chan struct{}, 1),
 		sBucket: &sBucket{
+			restoring:  false,
 			logChan:    make(chan *Log),
 			BucketPath: nil,
 			onChange:   nil,
-			Records:    &cmap.Map{},
+			Records:    &sync.Map{},
 		},
 	}
 	go func() {
@@ -302,20 +309,22 @@ func Open(opts *Opts) (Mappy, error) {
 				}
 				break
 			case lg := <-m.logChan:
-				if err := m.db.Update(func(tx *bbolt.Tx) error {
-					bucket := tx.Bucket([]byte("logs"))
-					seq, _ := bucket.NextSequence()
-					lg.Sequence = int(seq)
-					buf, err := lg.encode()
-					if err != nil {
-						return err
+				if !m.restoring {
+					if err := m.db.Update(func(tx *bbolt.Tx) error {
+						bucket := tx.Bucket([]byte("logs"))
+						seq, _ := bucket.NextSequence()
+						lg.Sequence = int(seq)
+						buf, err := lg.encode()
+						if err != nil {
+							return err
+						}
+						if err := bucket.Put(uint64ToBytes(uint64(time.Now().UnixNano())), buf.Bytes()); err != nil {
+							return err
+						}
+						return nil
+					}); err != nil {
+						log.Printf("mappy: %s\n", err.Error())
 					}
-					if err := bucket.Put(uint64ToBytes(uint64(time.Now().UnixNano())), buf.Bytes()); err != nil {
-						return err
-					}
-					return nil
-				}); err != nil {
-					log.Printf("mappy: %s\n", err.Error())
 				}
 			}
 		}
@@ -354,6 +363,35 @@ func (m *mappy) Replay(min, max time.Time, fn ReplayFunc) error {
 		return nil
 	})
 
+}
+
+func (m *mappy) Restore() error {
+	m.restoring = true
+	defer func() {
+		m.restoring = false
+	}()
+	return m.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte("logs"))
+		c := bucket.Cursor()
+		// Iterate over the 90's.
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			lg := &Log{}
+			if err := lg.decode(bytes.NewBuffer(v)); err != nil {
+				return err
+			}
+			switch lg.Op {
+			case DELETE:
+				if err := m.Delete(lg.Old.Key); err != nil {
+					return err
+				}
+			case SET:
+				if err := m.Set(lg.New); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
 }
 
 func (m *mappy) Destroy() error {
