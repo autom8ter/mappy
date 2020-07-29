@@ -13,27 +13,36 @@ func Test(t *testing.T) {
 	if err != nil {
 		t.Fatal(err.Error())
 	}
-	bucket := mapp.Nest("users").Nest("colemanword@gmail.com")
+	bucket := mapp.Nest(
+		&mappy.NestOpts{
+			Key: "users",
+		}).Nest(&mappy.NestOpts{
+		Key: "colemanword@gmail.com",
+	})
 	t.Log(bucket.Path())
 	now := time.Now()
-	if err := bucket.Set(&mappy.Record{
-		Key: "name",
-		Val: "Coleman Word",
+	if err := bucket.Set(&mappy.SetOpts{
+		Record: &mappy.Record{
+			Key: "name",
+			Val: "Coleman Word",
+		},
 	}); err != nil {
 		t.Fatal(err.Error())
 	}
 
 	t.Logf("set name : %s", time.Since(now).String())
 	now = time.Now()
-	res, _ := bucket.Get("name")
+	res, _ := bucket.Get(&mappy.GetOpts{
+		Key: "name",
+	})
 	t.Logf("get name : %s", time.Since(now).String())
 	if res.Val != "Coleman Word" {
 		t.Fatalf("expected: %s got: %s", "Coleman Word", res.Val)
 	}
-	if err := mapp.Flush(); err != nil {
+	if err := mapp.Flush(nil); err != nil {
 		t.Fatal(err.Error())
 	}
-	time.Sleep(1 *time.Second)
+	time.Sleep(1 * time.Second)
 	err = mapp.Restore()
 	if err != nil {
 		t.Fatal(err.Error())
@@ -66,7 +75,6 @@ func Test(t *testing.T) {
 	mapp.Destroy()
 }
 
-
 /* go test -bench Benchmark
 goos: darwin
 goarch: amd64
@@ -74,7 +82,7 @@ pkg: github.com/autom8ter/mappy
 Benchmark/SETUP-8               19399074                52.7 ns/op
 Benchmark/SET-8                 1000000000               0.000002 ns/op
 Benchmark/GET-8                 1000000000               0.000001 ns/op
- */
+*/
 func Benchmark(b *testing.B) {
 	os.RemoveAll(mappy.DefaultOpts.Path)
 	db, err := mappy.Open(mappy.DefaultOpts)
@@ -92,14 +100,25 @@ func Benchmark(b *testing.B) {
 	})
 	b.Run("SET", func(b *testing.B) {
 		for k, v := range vals {
-			if err := db.Nest("testing").Set(db.NewRecord(k, v)); err != nil {
+			if err := db.Nest(&mappy.NestOpts{
+				Key: "testing",
+			}).Set(&mappy.SetOpts{
+				Record: db.NewRecord(&mappy.RecordOpts{
+					Key: k,
+					Val: v,
+				}),
+			}); err != nil {
 				b.Fatal(err.Error())
 			}
 		}
 	})
 	b.Run("GET", func(b *testing.B) {
 		for k, v := range vals {
-			res, ok := db.Nest("testing").Get(k)
+			res, ok := db.Nest(&mappy.NestOpts{
+				Key: "testing",
+			}).Get(&mappy.GetOpts{
+				Key: k,
+			})
 			if !ok {
 				b.Fatal("value not found")
 			}
