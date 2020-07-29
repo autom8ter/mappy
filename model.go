@@ -66,7 +66,7 @@ type SetOpts struct {
 }
 
 type GetOpts struct {
-	Key string
+	Key interface{}
 }
 
 type DelOpts struct {

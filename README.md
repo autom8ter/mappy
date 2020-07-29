@@ -99,7 +99,7 @@ type FlushOpts struct {
 
 ```go
 type GetOpts struct {
-	Key string
+	Key interface{}
 }
 ```
 

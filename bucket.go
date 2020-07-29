@@ -206,7 +206,7 @@ func (s *sBucket) NestedBuckets() []Bucket {
 	return buckets
 }
 
-func fact(ctx context.Context, wg *sync.WaitGroup, smap *sync.Map, records chan(*Record)) *sync.Map {
+func fact(ctx context.Context, wg *sync.WaitGroup, smap *sync.Map, records chan (*Record)) *sync.Map {
 	if smap == nil {
 		return nil
 	}
