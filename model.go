@@ -23,11 +23,18 @@ const (
 var Done = errors.New("mappy: done")
 
 type Record struct {
-	Key        interface{} `json:"key"`
-	Val        interface{} `json:"val"`
-	BucketPath []string    `json:"bucketPath"`
-	GloablId   string      `json:"globalId"`
-	UpdatedAt  time.Time   `json:"updatedAt"`
+	Key        interface{}   `json:"key"`
+	Val        interface{}   `json:"val"`
+	BucketPath []interface{} `json:"bucketPath"`
+	GloablId   string        `json:"globalId"`
+	UpdatedAt  time.Time     `json:"updatedAt"`
+}
+
+func NewRecord(opts *RecordOpts) *Record {
+	return &Record{
+		Key: opts.Key,
+		Val: opts.Val,
+	}
 }
 
 type Log struct {
@@ -51,7 +58,7 @@ type ReplayFunc func(bucket Bucket, lg *Log) error
 type ChangeHandlerFunc func(bucket Bucket, log *Log) error
 
 type ViewOpts struct {
-	Fn ViewFunc
+	ViewFn ViewFunc
 }
 
 type SetOpts struct {
@@ -69,10 +76,6 @@ type DelOpts struct {
 type RecordOpts struct {
 	Key interface{}
 	Val interface{}
-}
-
-type NestOpts struct {
-	Key string
 }
 
 type LenOpts struct {
@@ -94,4 +97,13 @@ type ReplayOpts struct {
 	Min int
 	Max int
 	Fn  ReplayFunc
+}
+
+type BackupOpts struct {
+	Dest io.Writer
+}
+
+type BucketOpts struct {
+	Path     []string
+	GlobalId string
 }

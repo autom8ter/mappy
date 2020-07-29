@@ -7,21 +7,25 @@ import (
 	"time"
 )
 
+const pathSeparator = "##"
+
 type Bucket interface {
-	Path() []string
-	Record(opts *RecordOpts) *Record
-	Nest(opts *NestOpts) Bucket
+	Key() interface{}
+	Path() []interface{}
+	NewRecord(opts *RecordOpts) *Record
+	Nest(key interface{}) Bucket
+	NestedBuckets() []Bucket
 	Del(opts *DelOpts) error
 	Flush(opts *FlushOpts) error
-	Len(opts *LenOpts) int
+	Count(opts *LenOpts) int
 	Get(opts *GetOpts) (value *Record, ok bool)
-	Set(opts *SetOpts) error
+	Set(opts *SetOpts) (*Record, error)
 	View(opts *ViewOpts) error
-	OnChange(fns... ChangeHandlerFunc)
+	OnChange(fns ...ChangeHandlerFunc)
 }
 
 type sBucket struct {
-	BucketPath  []string
+	BucketPath  []interface{}
 	onChange    []ChangeHandlerFunc
 	disableLogs bool
 	Records     *sync.Map
@@ -29,11 +33,15 @@ type sBucket struct {
 	nested      *sync.Map
 }
 
-func (s *sBucket) Path() []string {
+func (s *sBucket) Key() interface{} {
+	return s.BucketPath[0]
+}
+
+func (s *sBucket) Path() []interface{} {
 	return s.BucketPath
 }
 
-func (s *sBucket) Record(opts *RecordOpts) *Record {
+func (s *sBucket) NewRecord(opts *RecordOpts) *Record {
 	return &Record{
 		Key:        opts.Key,
 		Val:        opts.Val,
@@ -42,8 +50,8 @@ func (s *sBucket) Record(opts *RecordOpts) *Record {
 	}
 }
 
-func (s *sBucket) Nest(opts *NestOpts) Bucket {
-	v, ok := s.nested.Load(opts.Key)
+func (s *sBucket) Nest(key interface{}) Bucket {
+	v, ok := s.nested.Load(key)
 	if ok {
 		b, ok := v.(*sBucket)
 		if ok {
@@ -51,7 +59,7 @@ func (s *sBucket) Nest(opts *NestOpts) Bucket {
 		}
 	}
 	bucketPath := s.BucketPath
-	bucketPath = append(bucketPath, opts.Key)
+	bucketPath = append(bucketPath, key)
 	b := &sBucket{
 		disableLogs: s.disableLogs,
 		logChan:     s.logChan,
@@ -60,7 +68,7 @@ func (s *sBucket) Nest(opts *NestOpts) Bucket {
 		Records:     &sync.Map{},
 		nested:      &sync.Map{},
 	}
-	s.nested.Store(opts.Key, b)
+	s.nested.Store(key, b)
 	return b
 }
 
@@ -68,10 +76,10 @@ func (s *sBucket) bucket() Bucket {
 	return s
 }
 
-func (s *sBucket) Len(opts *LenOpts) int {
+func (s *sBucket) Count(opts *LenOpts) int {
 	counter := 0
 	_ = s.View(&ViewOpts{
-		Fn: func(bucket Bucket, record *Record) error {
+		ViewFn: func(bucket Bucket, record *Record) error {
 			if record != nil {
 				counter++
 			}
@@ -88,6 +96,9 @@ func (s *sBucket) getRecord(key interface{}) (*Record, bool) {
 	record, ok := val.(*Record)
 	if !ok {
 		return nil, false
+	}
+	if record.BucketPath == nil {
+		record.BucketPath = s.BucketPath
 	}
 	return record, true
 }
@@ -113,12 +124,17 @@ func (s *sBucket) Get(opts *GetOpts) (*Record, bool) {
 	return s.getRecord(opts.Key)
 }
 
-func (s *sBucket) Set(opts *SetOpts) error {
+func (s *sBucket) Set(opts *SetOpts) (*Record, error) {
 	if !s.disableLogs {
 		opts.Record.UpdatedAt = time.Now()
 	}
 	opts.Record.BucketPath = s.BucketPath
-	opts.Record.GloablId = strings.Join(opts.Record.BucketPath, " -->-->")
+	var path []string
+	for _, i := range opts.Record.BucketPath {
+		path = append(path, fmt.Sprintf("%v", i))
+	}
+	path = append(path, fmt.Sprintf("%v", opts.Record.Key))
+	opts.Record.GloablId = strings.Join(path, pathSeparator)
 	s.Records.Store(opts.Record.Key, opts.Record)
 	lg := &Log{
 		Op:        SET,
@@ -128,10 +144,10 @@ func (s *sBucket) Set(opts *SetOpts) error {
 	s.logChan <- lg
 	for _, fn := range s.onChange {
 		if err := fn(s, lg); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return opts.Record, nil
 }
 
 func (s *sBucket) View(opts *ViewOpts) error {
@@ -139,7 +155,7 @@ func (s *sBucket) View(opts *ViewOpts) error {
 	s.Records.Range(func(key interface{}, value interface{}) bool {
 		record, ok := value.(*Record)
 		if ok {
-			if err := opts.Fn(s, record); err != nil {
+			if err := opts.ViewFn(s, record); err != nil {
 				if err == Done {
 					return false
 				}
@@ -175,6 +191,16 @@ func (m *sBucket) Flush(opts *FlushOpts) error {
 	return nil
 }
 
-func (s *sBucket) OnChange(fns... ChangeHandlerFunc) {
+func (s *sBucket) OnChange(fns ...ChangeHandlerFunc) {
 	s.onChange = fns
+}
+func (s *sBucket) NestedBuckets() []Bucket {
+	var buckets = []Bucket{}
+	s.nested.Range(func(key, value interface{}) bool {
+		if b, ok := value.(*sBucket); ok && b != nil {
+			buckets = append(buckets, b)
+		}
+		return true
+	})
+	return buckets
 }

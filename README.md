@@ -16,20 +16,39 @@ var DefaultOpts = &Opts{
 var Done = errors.New("mappy: done")
 ```
 
+#### type BackupOpts
+
+```go
+type BackupOpts struct {
+	Dest io.Writer
+}
+```
+
+
 #### type Bucket
 
 ```go
 type Bucket interface {
 	Path() []string
-	Record(opts *RecordOpts) *Record
+	NewRecord(opts *RecordOpts) *Record
 	Nest(opts *NestOpts) Bucket
 	Del(opts *DelOpts) error
 	Flush(opts *FlushOpts) error
-	Len(opts *LenOpts) int
+	Count(opts *LenOpts) int
 	Get(opts *GetOpts) (value *Record, ok bool)
-	Set(opts *SetOpts) error
+	Set(opts *SetOpts) (*Record, error)
 	View(opts *ViewOpts) error
 	OnChange(fns ...ChangeHandlerFunc)
+}
+```
+
+
+#### type BucketOpts
+
+```go
+type BucketOpts struct {
+	Path     []string
+	GlobalId string
 }
 ```
 
@@ -108,12 +127,12 @@ type Log struct {
 ```go
 type Mappy interface {
 	Bucket
-	Bucket(path []string) Bucket
+	GetRecord(globalId string) (*Record, bool)
+	GetBucket(path []string) Bucket
 	Close(opts *CloseOpts) error
-
 	DestroyLogs(opts *DestroyOpts) error
 	ReplayLogs(opts *ReplayOpts) error
-	BackupLogs(w io.Writer) (int64, error)
+	BackupLogs(opts *BackupOpts) (int64, error)
 }
 ```
 
@@ -169,6 +188,12 @@ type Record struct {
 }
 ```
 
+
+#### func  NewRecord
+
+```go
+func NewRecord(opts *RecordOpts) *Record
+```
 
 #### type RecordOpts
 
@@ -226,6 +251,6 @@ type ViewFunc func(bucket Bucket, record *Record) error
 
 ```go
 type ViewOpts struct {
-	Fn ViewFunc
+	ViewFn ViewFunc
 }
 ```
