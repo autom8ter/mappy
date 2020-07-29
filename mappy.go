@@ -1,3 +1,5 @@
+//go:generate godocdown -o README.md
+
 package mappy
 
 import (
