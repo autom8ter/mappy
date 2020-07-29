@@ -3,6 +3,7 @@ package mappy
 import (
 	"bytes"
 	"go.etcd.io/bbolt"
+	"io"
 	"log"
 	"os"
 	"sync"
@@ -10,11 +11,12 @@ import (
 
 type Mappy interface {
 	Bucket
-	Replay(opts *ReplayOpts) error
-	Restore(opts *RestoreOpts) error
 	Bucket(path []string) Bucket
 	Close(opts *CloseOpts) error
-	Destroy(opts *DestroyOpts) error
+
+	DestroyLogs(opts *DestroyOpts) error
+	ReplayLogs(opts *ReplayOpts) error
+	BackupLogs(w io.Writer) (int64, error)
 }
 
 type mappy struct {
@@ -32,14 +34,15 @@ type Opts struct {
 }
 
 var DefaultOpts = &Opts{
-	Path: "/tmp/mappy",
+	Path:    "/tmp/mappy",
+	Restore: true,
 }
 
 func Open(opts *Opts) (Mappy, error) {
 	if _, err := os.Stat(opts.Path); os.IsNotExist(err) {
 		os.MkdirAll(opts.Path, 0777)
 	}
-	logStore, err := bbolt.Open(opts.Path+"/mappy.db", 0700, bbolt.DefaultOptions)
+	logStore, err := bbolt.Open(opts.Path+"/logs.db", 0700, bbolt.DefaultOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +101,7 @@ func Open(opts *Opts) (Mappy, error) {
 		m.done = true
 	}()
 	if opts.Restore {
-		return m, m.Restore(nil)
+		return m, m.restore(nil)
 	}
 	return m, nil
 }
@@ -129,7 +132,7 @@ func (m *mappy) Bucket(path []string) Bucket {
 	return bucket
 }
 
-func (m *mappy) Replay(opts *ReplayOpts) error {
+func (m *mappy) ReplayLogs(opts *ReplayOpts) error {
 	return m.db.View(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte("logs"))
 		c := bucket.Cursor()
@@ -138,7 +141,7 @@ func (m *mappy) Replay(opts *ReplayOpts) error {
 			if err := lg.decode(bytes.NewBuffer(v)); err != nil {
 				return err
 			}
-			if err := opts.Fn(lg); err != nil {
+			if err := opts.Fn(m, lg); err != nil {
 				return err
 			}
 		}
@@ -147,7 +150,7 @@ func (m *mappy) Replay(opts *ReplayOpts) error {
 
 }
 
-func (m *mappy) Restore(opts *RestoreOpts) error {
+func (m *mappy) restore(opts *RestoreOpts) error {
 	if err := m.db.View(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte("logs"))
 		c := bucket.Cursor()
@@ -175,11 +178,27 @@ func (m *mappy) Restore(opts *RestoreOpts) error {
 	return nil
 }
 
-func (m *mappy) Destroy(opts *DestroyOpts) error {
+func (m *mappy) DestroyLogs(opts *DestroyOpts) error {
 	if !m.done {
 		if err := m.Close(&CloseOpts{}); err != nil {
 			return err
 		}
 	}
 	return os.RemoveAll(m.o.Path)
+}
+
+func (m *mappy) BackupLogs(w io.Writer) (int64, error) {
+	var count int64
+	if err := m.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte("logs"))
+		bits, err := bucket.Tx().WriteTo(w)
+		count = bits
+		if err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		return count, err
+	}
+	return count, nil
 }

@@ -2,13 +2,14 @@ package mappy
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
 
 type Bucket interface {
 	Path() []string
-	NewRecord(opts *RecordOpts) *Record
+	Record(opts *RecordOpts) *Record
 	Nest(opts *NestOpts) Bucket
 	Del(opts *DelOpts) error
 	Flush(opts *FlushOpts) error
@@ -31,11 +32,7 @@ func (s *sBucket) Path() []string {
 	return s.BucketPath
 }
 
-func (s *sBucket) History(enable bool) {
-	s.disableLogs = enable
-}
-
-func (s *sBucket) NewRecord(opts *RecordOpts) *Record {
+func (s *sBucket) Record(opts *RecordOpts) *Record {
 	return &Record{
 		Key:        opts.Key,
 		Val:        opts.Val,
@@ -73,7 +70,7 @@ func (s *sBucket) bucket() Bucket {
 func (s *sBucket) Len(opts *LenOpts) int {
 	counter := 0
 	_ = s.View(&ViewOpts{
-		Fn: func(record *Record) error {
+		Fn: func(bucket Bucket, record *Record) error {
 			if record != nil {
 				counter++
 			}
@@ -82,7 +79,7 @@ func (s *sBucket) Len(opts *LenOpts) int {
 	return counter
 }
 
-func (s *sBucket) getRecord(key string) (*Record, bool) {
+func (s *sBucket) getRecord(key interface{}) (*Record, bool) {
 	val, ok := s.Records.Load(key)
 	if !ok {
 		return nil, false
@@ -104,7 +101,7 @@ func (s *sBucket) Del(opts *DelOpts) error {
 	}
 	s.logChan <- lg
 	for _, fn := range s.onChange {
-		if err := fn(lg); err != nil {
+		if err := fn(s, lg); err != nil {
 			return err
 		}
 	}
@@ -120,6 +117,7 @@ func (s *sBucket) Set(opts *SetOpts) error {
 		opts.Record.UpdatedAt = time.Now()
 	}
 	opts.Record.BucketPath = s.BucketPath
+	opts.Record.GloablId = strings.Join(opts.Record.BucketPath, " -->-->")
 	s.Records.Store(opts.Record.Key, opts.Record)
 	lg := &Log{
 		Op:        SET,
@@ -128,7 +126,7 @@ func (s *sBucket) Set(opts *SetOpts) error {
 	}
 	s.logChan <- lg
 	for _, fn := range s.onChange {
-		if err := fn(lg); err != nil {
+		if err := fn(s, lg); err != nil {
 			return err
 		}
 	}
@@ -140,7 +138,7 @@ func (s *sBucket) View(opts *ViewOpts) error {
 	s.Records.Range(func(key interface{}, value interface{}) bool {
 		record, ok := value.(*Record)
 		if ok {
-			if err := opts.Fn(record); err != nil {
+			if err := opts.Fn(s, record); err != nil {
 				if err == Done {
 					return false
 				}

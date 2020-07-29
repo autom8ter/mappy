@@ -3,9 +3,7 @@ package mappy
 import (
 	"bytes"
 	"encoding/gob"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"time"
 )
@@ -25,15 +23,11 @@ const (
 var Done = errors.New("mappy: done")
 
 type Record struct {
-	Key        string      `json:"key"`
+	Key        interface{} `json:"key"`
 	Val        interface{} `json:"val"`
 	BucketPath []string    `json:"bucketPath"`
+	GloablId   string      `json:"globalId"`
 	UpdatedAt  time.Time   `json:"updatedAt"`
-}
-
-func (r *Record) JSON() string {
-	bits, _ := json.MarshalIndent(r, "", "    ")
-	return fmt.Sprintf("%s", bits)
 }
 
 type Log struct {
@@ -52,9 +46,9 @@ func (l *Log) decode(r io.Reader) error {
 	return gob.NewDecoder(r).Decode(l)
 }
 
-type ViewFunc func(record *Record) error
-type ReplayFunc func(lg *Log) error
-type ChangeHandlerFunc func(log *Log) error
+type ViewFunc func(bucket Bucket, record *Record) error
+type ReplayFunc func(bucket Bucket, lg *Log) error
+type ChangeHandlerFunc func(bucket Bucket, log *Log) error
 
 type ViewOpts struct {
 	Fn ViewFunc
@@ -69,11 +63,11 @@ type GetOpts struct {
 }
 
 type DelOpts struct {
-	Key string
+	Key interface{}
 }
 
 type RecordOpts struct {
-	Key string
+	Key interface{}
 	Val interface{}
 }
 

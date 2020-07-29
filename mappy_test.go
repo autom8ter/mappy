@@ -1,6 +1,8 @@
 package mappy_test
 
 import (
+	"encoding/json"
+	"fmt"
 	"github.com/autom8ter/mappy"
 	"math/rand"
 	"os"
@@ -42,16 +44,24 @@ func Test(t *testing.T) {
 	if err := mapp.Flush(nil); err != nil {
 		t.Fatal(err.Error())
 	}
+	mapp.Close(nil)
 	time.Sleep(1 * time.Second)
-	err = mapp.Restore(&mappy.RestoreOpts{})
+	mapp2, err := mappy.Open(mappy.DefaultOpts)
 	if err != nil {
 		t.Fatal(err.Error())
 	}
+	bucket2 := mapp2.Nest(
+		&mappy.NestOpts{
+			Key: "users",
+		}).Nest(&mappy.NestOpts{
+		Key: "colemanword@gmail.com",
+	})
+	t.Log(bucket2.Path())
 	counter := 0
-	if err := bucket.View(&mappy.ViewOpts{
-		Fn: func(record *mappy.Record) error {
+	if err := bucket2.View(&mappy.ViewOpts{
+		Fn: func(b mappy.Bucket, record *mappy.Record) error {
 			counter++
-			t.Logf("%v %s\n", counter, record.JSON())
+			t.Logf("after restore: %v %s\n", counter, jSON(record))
 			return nil
 		},
 	}); err != nil {
@@ -60,25 +70,32 @@ func Test(t *testing.T) {
 	if counter == 0 {
 		t.Fatal("failed restore")
 	}
-	if err := mapp.Replay(&mappy.ReplayOpts{
+	if err := mapp2.ReplayLogs(&mappy.ReplayOpts{
 		Min: 0,
 		Max: 5,
-		Fn: func(lg *mappy.Log) error {
+		Fn: func(bucket mappy.Bucket, lg *mappy.Log) error {
 			switch lg.Op {
 			case mappy.DELETE:
-				t.Logf("DELETE: %v %v\n", lg.Sequence, lg.Record.JSON())
+				t.Logf("DELETE: %v %v\n", lg.Sequence, jSON(lg.Record))
 			case mappy.SET:
-				t.Logf("SET: %v %v\n", lg.Sequence, lg.Record.JSON())
+				t.Logf("SET: %v %v\n", lg.Sequence, jSON(lg.Record))
 			}
 			return nil
 		},
 	}); err != nil {
 		t.Fatal(err.Error())
 	}
-	if err := mapp.Close(&mappy.CloseOpts{}); err != nil {
+	f, _ := os.Create("backup.txt")
+	defer f.Close()
+	bits, err := mapp2.BackupLogs(f)
+	if err != nil {
 		t.Fatal(err.Error())
 	}
-	mapp.Destroy(&mappy.DestroyOpts{})
+	t.Logf("wrote: %v", bits)
+	if err := mapp2.Close(&mappy.CloseOpts{}); err != nil {
+		t.Fatal(err.Error())
+	}
+	mapp2.DestroyLogs(&mappy.DestroyOpts{})
 }
 
 /* go test -bench Benchmark
@@ -96,7 +113,7 @@ func Benchmark(b *testing.B) {
 		b.Fatal(err.Error())
 	}
 	var vals = map[string]string{}
-	defer db.Destroy(&mappy.DestroyOpts{})
+	defer db.DestroyLogs(&mappy.DestroyOpts{})
 	var seededRand *rand.Rand = rand.New(rand.NewSource(time.Now().UnixNano()))
 	b.ReportAllocs()
 	b.Run("SETUP", func(b *testing.B) {
@@ -109,7 +126,7 @@ func Benchmark(b *testing.B) {
 			if err := db.Nest(&mappy.NestOpts{
 				Key: "testing",
 			}).Set(&mappy.SetOpts{
-				Record: db.NewRecord(&mappy.RecordOpts{
+				Record: db.Record(&mappy.RecordOpts{
 					Key: k,
 					Val: v,
 				}),
@@ -133,4 +150,9 @@ func Benchmark(b *testing.B) {
 			}
 		}
 	})
+}
+
+func jSON(obj interface{}) string {
+	bits, _ := json.MarshalIndent(obj, "", "    ")
+	return fmt.Sprintf("%s", bits)
 }
