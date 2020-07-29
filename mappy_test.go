@@ -43,36 +43,42 @@ func Test(t *testing.T) {
 		t.Fatal(err.Error())
 	}
 	time.Sleep(1 * time.Second)
-	err = mapp.Restore()
+	err = mapp.Restore(&mappy.RestoreOpts{})
 	if err != nil {
 		t.Fatal(err.Error())
 	}
 	counter := 0
-	if err := bucket.View(func(record *mappy.Record) error {
-		counter++
-		t.Logf("%v %s\n", counter, record.JSON())
-		return nil
+	if err := bucket.View(&mappy.ViewOpts{
+		Fn: func(record *mappy.Record) error {
+			counter++
+			t.Logf("%v %s\n", counter, record.JSON())
+			return nil
+		},
 	}); err != nil {
 		t.Fatal(err.Error())
 	}
 	if counter == 0 {
 		t.Fatal("failed restore")
 	}
-	if err := mapp.Replay(0, 2, func(lg *mappy.Log) error {
-		switch lg.Op {
-		case mappy.DELETE:
-			t.Logf("DELETE: %v %v\n", lg.Sequence, lg.Record.JSON())
-		case mappy.SET:
-			t.Logf("SET: %v %v\n", lg.Sequence, lg.Record.JSON())
-		}
-		return nil
+	if err := mapp.Replay(&mappy.ReplayOpts{
+		Min: 0,
+		Max: 5,
+		Fn: func(lg *mappy.Log) error {
+			switch lg.Op {
+			case mappy.DELETE:
+				t.Logf("DELETE: %v %v\n", lg.Sequence, lg.Record.JSON())
+			case mappy.SET:
+				t.Logf("SET: %v %v\n", lg.Sequence, lg.Record.JSON())
+			}
+			return nil
+		},
 	}); err != nil {
 		t.Fatal(err.Error())
 	}
-	if err := mapp.Close(); err != nil {
+	if err := mapp.Close(&mappy.CloseOpts{}); err != nil {
 		t.Fatal(err.Error())
 	}
-	mapp.Destroy()
+	mapp.Destroy(&mappy.DestroyOpts{})
 }
 
 /* go test -bench Benchmark
@@ -90,7 +96,7 @@ func Benchmark(b *testing.B) {
 		b.Fatal(err.Error())
 	}
 	var vals = map[string]string{}
-	defer db.Destroy()
+	defer db.Destroy(&mappy.DestroyOpts{})
 	var seededRand *rand.Rand = rand.New(rand.NewSource(time.Now().UnixNano()))
 	b.ReportAllocs()
 	b.Run("SETUP", func(b *testing.B) {

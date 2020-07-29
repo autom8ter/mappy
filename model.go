@@ -56,6 +56,10 @@ type ViewFunc func(record *Record) error
 type ReplayFunc func(lg *Log) error
 type ChangeHandlerFunc func(log *Log) error
 
+type ViewOpts struct {
+	Fn ViewFunc
+}
+
 type SetOpts struct {
 	Record *Record
 }
@@ -87,4 +91,13 @@ type CloseOpts struct {
 }
 
 type DestroyOpts struct {
+}
+
+type RestoreOpts struct {
+}
+
+type ReplayOpts struct {
+	Min int
+	Max int
+	Fn  ReplayFunc
 }

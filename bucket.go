@@ -15,7 +15,7 @@ type Bucket interface {
 	Len(opts *LenOpts) int
 	Get(opts *GetOpts) (value *Record, ok bool)
 	Set(opts *SetOpts) error
-	View(fn ViewFunc) error
+	View(opts *ViewOpts) error
 }
 
 type sBucket struct {
@@ -72,12 +72,13 @@ func (s *sBucket) bucket() Bucket {
 
 func (s *sBucket) Len(opts *LenOpts) int {
 	counter := 0
-	_ = s.View(func(record *Record) error {
-		if record != nil {
-			counter++
-		}
-		return nil
-	})
+	_ = s.View(&ViewOpts{
+		Fn: func(record *Record) error {
+			if record != nil {
+				counter++
+			}
+			return nil
+		}})
 	return counter
 }
 
@@ -134,12 +135,12 @@ func (s *sBucket) Set(opts *SetOpts) error {
 	return nil
 }
 
-func (s *sBucket) View(fn ViewFunc) error {
+func (s *sBucket) View(opts *ViewOpts) error {
 	var errs []error
 	s.Records.Range(func(key interface{}, value interface{}) bool {
 		record, ok := value.(*Record)
 		if ok {
-			if err := fn(record); err != nil {
+			if err := opts.Fn(record); err != nil {
 				if err == Done {
 					return false
 				}

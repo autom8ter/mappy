@@ -10,11 +10,11 @@ import (
 
 type Mappy interface {
 	Bucket
-	Replay(min, max int, fn ReplayFunc) error
-	Restore() error
+	Replay(opts *ReplayOpts) error
+	Restore(opts *RestoreOpts) error
 	Bucket(path []string) Bucket
-	Close() error
-	Destroy() error
+	Close(opts *CloseOpts) error
+	Destroy(opts *DestroyOpts) error
 }
 
 type mappy struct {
@@ -98,12 +98,12 @@ func Open(opts *Opts) (Mappy, error) {
 		m.done = true
 	}()
 	if opts.Restore {
-		return m, m.Restore()
+		return m, m.Restore(nil)
 	}
 	return m, nil
 }
 
-func (m *mappy) Close() error {
+func (m *mappy) Close(opts *CloseOpts) error {
 	log.Println("mappy: closing...")
 	close(m.logChan)
 	m.closing = true
@@ -129,16 +129,16 @@ func (m *mappy) Bucket(path []string) Bucket {
 	return bucket
 }
 
-func (m *mappy) Replay(min, max int, fn ReplayFunc) error {
+func (m *mappy) Replay(opts *ReplayOpts) error {
 	return m.db.View(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte("logs"))
 		c := bucket.Cursor()
-		for k, v := c.Seek(uint64ToBytes(uint64(min))); k != nil && bytes.Compare(k, uint64ToBytes(uint64(max))) <= 0; k, v = c.Next() {
+		for k, v := c.Seek(uint64ToBytes(uint64(opts.Min))); k != nil && bytes.Compare(k, uint64ToBytes(uint64(opts.Max))) <= 0; k, v = c.Next() {
 			lg := &Log{}
 			if err := lg.decode(bytes.NewBuffer(v)); err != nil {
 				return err
 			}
-			if err := fn(lg); err != nil {
+			if err := opts.Fn(lg); err != nil {
 				return err
 			}
 		}
@@ -147,7 +147,7 @@ func (m *mappy) Replay(min, max int, fn ReplayFunc) error {
 
 }
 
-func (m *mappy) Restore() error {
+func (m *mappy) Restore(opts *RestoreOpts) error {
 	if err := m.db.View(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte("logs"))
 		c := bucket.Cursor()
@@ -175,9 +175,9 @@ func (m *mappy) Restore() error {
 	return nil
 }
 
-func (m *mappy) Destroy() error {
+func (m *mappy) Destroy(opts *DestroyOpts) error {
 	if !m.done {
-		if err := m.Close(); err != nil {
+		if err := m.Close(&CloseOpts{}); err != nil {
 			return err
 		}
 	}
