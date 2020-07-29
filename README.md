@@ -29,9 +29,11 @@ type BackupOpts struct {
 
 ```go
 type Bucket interface {
-	Path() []string
+	Key() interface{}
+	Path() []interface{}
 	NewRecord(opts *RecordOpts) *Record
-	Nest(opts *NestOpts) Bucket
+	Nest(key interface{}) Bucket
+	NestedBuckets() []Bucket
 	Del(opts *DelOpts) error
 	Flush(opts *FlushOpts) error
 	Count(opts *LenOpts) int
@@ -128,7 +130,7 @@ type Log struct {
 type Mappy interface {
 	Bucket
 	GetRecord(globalId string) (*Record, bool)
-	GetBucket(path []string) Bucket
+	GetBucket(path []interface{}) Bucket
 	Close(opts *CloseOpts) error
 	DestroyLogs(opts *DestroyOpts) error
 	ReplayLogs(opts *ReplayOpts) error
@@ -142,15 +144,6 @@ type Mappy interface {
 ```go
 func Open(opts *Opts) (Mappy, error)
 ```
-
-#### type NestOpts
-
-```go
-type NestOpts struct {
-	Key string
-}
-```
-
 
 #### type Op
 
@@ -180,11 +173,11 @@ type Opts struct {
 
 ```go
 type Record struct {
-	Key        interface{} `json:"key"`
-	Val        interface{} `json:"val"`
-	BucketPath []string    `json:"bucketPath"`
-	GloablId   string      `json:"globalId"`
-	UpdatedAt  time.Time   `json:"updatedAt"`
+	Key        interface{}   `json:"key"`
+	Val        interface{}   `json:"val"`
+	BucketPath []interface{} `json:"bucketPath"`
+	GloablId   string        `json:"globalId"`
+	UpdatedAt  time.Time     `json:"updatedAt"`
 }
 ```
 
