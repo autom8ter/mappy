@@ -54,11 +54,17 @@ func (l *Log) decode(r io.Reader) error {
 }
 
 type ViewFunc func(bucket Bucket, record *Record) error
+type NestedViewFunc func(parent, child Bucket) error
+
 type ReplayFunc func(bucket Bucket, lg *Log) error
 type ChangeHandlerFunc func(bucket Bucket, log *Log) error
 
 type ViewOpts struct {
-	ViewFn ViewFunc
+	Fn ViewFunc
+}
+
+type NestedViewOpts struct {
+	Fn NestedViewFunc
 }
 
 type SetOpts struct {

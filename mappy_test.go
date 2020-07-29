@@ -55,7 +55,7 @@ func Test(t *testing.T) {
 	t.Log(bucket2.Path())
 	counter := 0
 	if err := bucket2.View(&mappy.ViewOpts{
-		ViewFn: func(b mappy.Bucket, record *mappy.Record) error {
+		Fn: func(b mappy.Bucket, record *mappy.Record) error {
 			counter++
 			t.Logf("after restore: %v %s\n", counter, jSON(record))
 			return nil

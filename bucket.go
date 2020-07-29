@@ -1,7 +1,6 @@
 package mappy
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -15,7 +14,7 @@ type Bucket interface {
 	Path() []interface{}
 	NewRecord(opts *RecordOpts) *Record
 	Nest(key interface{}) Bucket
-	NestedBuckets() []Bucket
+	ViewNested(opts *NestedViewOpts) error
 	Del(opts *DelOpts) error
 	Flush(opts *FlushOpts) error
 	Count(opts *LenOpts) int
@@ -80,7 +79,7 @@ func (s *sBucket) bucket() Bucket {
 func (s *sBucket) Count(opts *LenOpts) int {
 	counter := 0
 	_ = s.View(&ViewOpts{
-		ViewFn: func(bucket Bucket, record *Record) error {
+		Fn: func(bucket Bucket, record *Record) error {
 			if record != nil {
 				counter++
 			}
@@ -156,7 +155,32 @@ func (s *sBucket) View(opts *ViewOpts) error {
 	s.records.Range(func(key interface{}, value interface{}) bool {
 		record, ok := value.(*Record)
 		if ok {
-			if err := opts.ViewFn(s, record); err != nil {
+			if err := opts.Fn(s, record); err != nil {
+				if err == Done {
+					return false
+				}
+				errs = append(errs, err)
+				return false
+			}
+		}
+		return true
+	})
+	if len(errs) > 0 {
+		var err error
+		for i, e := range errs {
+			err = fmt.Errorf("mappy error %v: %s", i, e.Error())
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *sBucket) ViewNested(opts *NestedViewOpts) error {
+	var errs []error
+	s.nested.Range(func(key interface{}, value interface{}) bool {
+		b, ok := value.(*sBucket)
+		if ok {
+			if err := opts.Fn(s, b); err != nil {
 				if err == Done {
 					return false
 				}
@@ -194,32 +218,4 @@ func (m *sBucket) Flush(opts *FlushOpts) error {
 
 func (s *sBucket) OnChange(fns ...ChangeHandlerFunc) {
 	s.onChange = fns
-}
-func (s *sBucket) NestedBuckets() []Bucket {
-	var buckets = []Bucket{}
-	s.nested.Range(func(key, value interface{}) bool {
-		if b, ok := value.(*sBucket); ok && b != nil {
-			buckets = append(buckets, b)
-		}
-		return true
-	})
-	return buckets
-}
-
-func fact(ctx context.Context, wg *sync.WaitGroup, smap *sync.Map, records chan (*Record)) *sync.Map {
-	if smap == nil {
-		return nil
-	}
-	smap.Range(func(key, value interface{}) bool {
-		if b, ok := value.(*sBucket); ok {
-			go func(slocalMap *sync.Map) *sync.Map {
-				return fact(ctx, wg, b.nested, records)
-			}(smap)
-		}
-		if record, ok := value.(*Record); ok {
-			records <- record
-		}
-		return true
-	})
-	return fact(ctx, wg, smap, records)
 }
