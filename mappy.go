@@ -109,18 +109,10 @@ func Open(opts *Opts) (Mappy, error) {
 }
 
 func (m *mappy) Close(opts *CloseOpts) error {
-	log.Println("mappy: closing...")
-	close(m.logChan)
 	m.closing = true
-	for {
-		if m.done {
-			if err := m.db.Close(); err != nil {
-				log.Printf("mappy: %s\n", err.Error())
-			}
-			break
-		}
+	if err := m.db.Close(); err != nil {
+		log.Printf("mappy: %s\n", err.Error())
 	}
-
 	return nil
 }
 
