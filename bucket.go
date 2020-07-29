@@ -17,6 +17,7 @@ type Bucket interface {
 	Get(opts *GetOpts) (value *Record, ok bool)
 	Set(opts *SetOpts) error
 	View(opts *ViewOpts) error
+	OnChange(fns... ChangeHandlerFunc)
 }
 
 type sBucket struct {
@@ -172,4 +173,8 @@ func (m *sBucket) Flush(opts *FlushOpts) error {
 		return true
 	})
 	return nil
+}
+
+func (s *sBucket) OnChange(fns... ChangeHandlerFunc) {
+	s.onChange = fns
 }
