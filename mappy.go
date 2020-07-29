@@ -64,9 +64,9 @@ func Open(opts *Opts) (Mappy, error) {
 		sBucket: &sBucket{
 			disableLogs: false,
 			logChan:     make(chan *Log),
-			BucketPath:  nil,
+			bucketPath:  nil,
 			onChange:    nil,
-			Records:     &sync.Map{},
+			records:     &sync.Map{},
 			nested:      &sync.Map{},
 		},
 	}
@@ -159,10 +159,6 @@ func (m *mappy) ReplayLogs(opts *ReplayOpts) error {
 		}
 		return nil
 	})
-
-}
-
-func (m *mappy) Snapshot() {
 
 }
 

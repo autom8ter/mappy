@@ -1,6 +1,7 @@
 package mappy
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -25,27 +26,27 @@ type Bucket interface {
 }
 
 type sBucket struct {
-	BucketPath  []interface{}
+	bucketPath  []interface{}
 	onChange    []ChangeHandlerFunc
 	disableLogs bool
-	Records     *sync.Map
+	records     *sync.Map
 	logChan     chan *Log
 	nested      *sync.Map
 }
 
 func (s *sBucket) Key() interface{} {
-	return s.BucketPath[0]
+	return s.bucketPath[0]
 }
 
 func (s *sBucket) Path() []interface{} {
-	return s.BucketPath
+	return s.bucketPath
 }
 
 func (s *sBucket) NewRecord(opts *RecordOpts) *Record {
 	return &Record{
 		Key:        opts.Key,
 		Val:        opts.Val,
-		BucketPath: s.BucketPath,
+		BucketPath: s.bucketPath,
 		UpdatedAt:  time.Now(),
 	}
 }
@@ -58,14 +59,14 @@ func (s *sBucket) Nest(key interface{}) Bucket {
 			return b
 		}
 	}
-	bucketPath := s.BucketPath
+	bucketPath := s.bucketPath
 	bucketPath = append(bucketPath, key)
 	b := &sBucket{
 		disableLogs: s.disableLogs,
 		logChan:     s.logChan,
-		BucketPath:  bucketPath,
+		bucketPath:  bucketPath,
 		onChange:    nil,
-		Records:     &sync.Map{},
+		records:     &sync.Map{},
 		nested:      &sync.Map{},
 	}
 	s.nested.Store(key, b)
@@ -89,7 +90,7 @@ func (s *sBucket) Count(opts *LenOpts) int {
 }
 
 func (s *sBucket) getRecord(key interface{}) (*Record, bool) {
-	val, ok := s.Records.Load(key)
+	val, ok := s.records.Load(key)
 	if !ok {
 		return nil, false
 	}
@@ -98,13 +99,13 @@ func (s *sBucket) getRecord(key interface{}) (*Record, bool) {
 		return nil, false
 	}
 	if record.BucketPath == nil {
-		record.BucketPath = s.BucketPath
+		record.BucketPath = s.bucketPath
 	}
 	return record, true
 }
 
 func (s *sBucket) Del(opts *DelOpts) error {
-	s.Records.Delete(opts.Key)
+	s.records.Delete(opts.Key)
 	before, _ := s.getRecord(opts.Key)
 	lg := &Log{
 		Op:        DELETE,
@@ -128,14 +129,14 @@ func (s *sBucket) Set(opts *SetOpts) (*Record, error) {
 	if !s.disableLogs {
 		opts.Record.UpdatedAt = time.Now()
 	}
-	opts.Record.BucketPath = s.BucketPath
+	opts.Record.BucketPath = s.bucketPath
 	var path []string
 	for _, i := range opts.Record.BucketPath {
 		path = append(path, fmt.Sprintf("%v", i))
 	}
 	path = append(path, fmt.Sprintf("%v", opts.Record.Key))
 	opts.Record.GloablId = strings.Join(path, pathSeparator)
-	s.Records.Store(opts.Record.Key, opts.Record)
+	s.records.Store(opts.Record.Key, opts.Record)
 	lg := &Log{
 		Op:        SET,
 		Record:    opts.Record,
@@ -152,7 +153,7 @@ func (s *sBucket) Set(opts *SetOpts) (*Record, error) {
 
 func (s *sBucket) View(opts *ViewOpts) error {
 	var errs []error
-	s.Records.Range(func(key interface{}, value interface{}) bool {
+	s.records.Range(func(key interface{}, value interface{}) bool {
 		record, ok := value.(*Record)
 		if ok {
 			if err := opts.ViewFn(s, record); err != nil {
@@ -184,8 +185,8 @@ func (m *sBucket) Flush(opts *FlushOpts) error {
 		}
 		return true
 	})
-	m.Records.Range(func(key, value interface{}) bool {
-		m.Records.Delete(key)
+	m.records.Range(func(key, value interface{}) bool {
+		m.records.Delete(key)
 		return true
 	})
 	return nil
@@ -203,4 +204,22 @@ func (s *sBucket) NestedBuckets() []Bucket {
 		return true
 	})
 	return buckets
+}
+
+func fact(ctx context.Context, wg *sync.WaitGroup, smap *sync.Map, records chan(*Record)) *sync.Map {
+	if smap == nil {
+		return nil
+	}
+	smap.Range(func(key, value interface{}) bool {
+		if b, ok := value.(*sBucket); ok {
+			go func(slocalMap *sync.Map) *sync.Map {
+				return fact(ctx, wg, b.nested, records)
+			}(smap)
+		}
+		if record, ok := value.(*Record); ok {
+			records <- record
+		}
+		return true
+	})
+	return fact(ctx, wg, smap, records)
 }
